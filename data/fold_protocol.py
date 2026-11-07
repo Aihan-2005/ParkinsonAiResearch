@@ -20,6 +20,11 @@ KNOWN_UNASSIGNED = {
 KNOWN_WORKBOOK_IDENTITY_MISSING_FROM_ARCHIVE = {
     "control::subject 09": "Present in folding_TLO.xlsx (Fold 33) but no participant directory/image in supplied archive; retained in test roster with zero images."
 }
+_FINAL_LABEL_STATUSES = {
+    "finalized_by_unanimous_vote",
+    "finalized_by_control_majority",
+    "finalized_as_unknown",
+}
 
 
 def read_csv(path: Path) -> list[dict[str, str]]:
@@ -59,73 +64,77 @@ def _split_cell(value: object, *, field: str, excel_row: int) -> list[str]:
 
 
 def read_workbook_assignments(workbook_path: Path) -> tuple[list[dict[str, str]], str]:
-
     workbook_path = Path(workbook_path)
     if not workbook_path.is_file():
         raise FileNotFoundError(workbook_path)
     workbook_hash = sha256(workbook_path)
     workbook = load_workbook(workbook_path, read_only=True, data_only=True)
-    sheet = workbook.active
-    header = [str(cell.value).strip() if cell.value is not None else "" for cell in sheet[1]]
-    required = {"Fold", "Val_subj", "Class", "Age", "Gender"}
-    missing = required - set(header)
-    if missing:
-        raise ValueError(f"folding_TLO.xlsx is missing columns: {sorted(missing)}")
-    index = {name: header.index(name) for name in required}
+    try:
+        sheet = workbook.active
+        header = [str(cell.value).strip() if cell.value is not None else "" for cell in sheet[1]]
+        required = {"Fold", "Val_subj", "Class", "Age", "Gender"}
+        missing = required - set(header)
+        if missing:
+            raise ValueError(f"folding_TLO.xlsx is missing columns: {sorted(missing)}")
+        index = {name: header.index(name) for name in required}
 
-    assignments: list[dict[str, str]] = []
-    seen_participants: set[str] = set()
-    seen_folds: set[int] = set()
-    for excel_row, values in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
-        if not values or all(value is None for value in values):
-            continue
-        fold_value = values[index["Fold"]]
-        if fold_value is None:
-            continue
-        fold_id = int(fold_value)
-        if fold_id in seen_folds:
-            raise ValueError(f"Workbook contains duplicate Fold row: {fold_id}")
-        seen_folds.add(fold_id)
-
-        subjects = _split_cell(values[index["Val_subj"]], field="Val_subj", excel_row=excel_row)
-        classes = _split_cell(values[index["Class"]], field="Class", excel_row=excel_row)
-        ages = _split_cell(values[index["Age"]], field="Age", excel_row=excel_row)
-        genders = _split_cell(values[index["Gender"]], field="Gender", excel_row=excel_row)
-        if not (len(subjects) == len(classes) == len(ages) == len(genders) == 2):
-            raise ValueError(
-                f"Workbook row {excel_row}: Val_subj/Class/Age/Gender must each describe exactly two participants"
-            )
-
-        for position, (subject_number, cohort_code, age, gender) in enumerate(
-            zip(subjects, classes, ages, genders), start=1
-        ):
-            if cohort_code.casefold() not in {"c", "p"}:
-                raise ValueError(f"Workbook row {excel_row}: unsupported Class code {cohort_code!r}")
-            cohort = "control" if cohort_code.casefold() == "c" else "parkinson"
+        assignments: list[dict[str, str]] = []
+        seen_participants: set[str] = set()
+        seen_folds: set[int] = set()
+        for excel_row, values in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
+            if not values or all(value is None for value in values):
+                continue
+            fold_value = values[index["Fold"]]
+            if fold_value is None:
+                continue
             try:
-                subject_int = int(subject_number)
-            except ValueError as exc:
-                raise ValueError(f"Workbook row {excel_row}: invalid subject number {subject_number!r}") from exc
-            participant_id = f"{cohort}::subject {subject_int:02d}"
-            if participant_id in seen_participants:
-                raise ValueError(f"Participant appears in more than one workbook fold: {participant_id}")
-            seen_participants.add(participant_id)
-            assignments.append({
-                "participant_id": participant_id,
-                "cohort": cohort,
-                "subject_name": f"subject {subject_int:02d}",
-                "workbook_fold_id": str(fold_id),
-                "workbook_partition": "development" if fold_id <= 25 else "heldout_test",
-                "workbook_class_code": cohort_code.casefold(),
-                "workbook_age_code": age.casefold(),
-                "workbook_gender_code": gender.casefold(),
-                "workbook_excel_row": str(excel_row),
-                "participant_position_in_fold": str(position),
-                "source_workbook": workbook_path.name,
-                "source_workbook_sha256": workbook_hash,
-            })
+                fold_id = int(fold_value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Workbook row {excel_row}: invalid Fold value {fold_value!r}") from exc
+            if fold_id in seen_folds:
+                raise ValueError(f"Workbook contains duplicate Fold row: {fold_id}")
+            seen_folds.add(fold_id)
 
-    workbook.close()
+            subjects = _split_cell(values[index["Val_subj"]], field="Val_subj", excel_row=excel_row)
+            classes = _split_cell(values[index["Class"]], field="Class", excel_row=excel_row)
+            ages = _split_cell(values[index["Age"]], field="Age", excel_row=excel_row)
+            genders = _split_cell(values[index["Gender"]], field="Gender", excel_row=excel_row)
+            if not (len(subjects) == len(classes) == len(ages) == len(genders) == 2):
+                raise ValueError(
+                    f"Workbook row {excel_row}: Val_subj/Class/Age/Gender must each describe exactly two participants"
+                )
+
+            for position, (subject_number, cohort_code, age, gender) in enumerate(
+                zip(subjects, classes, ages, genders), start=1
+            ):
+                if cohort_code.casefold() not in {"c", "p"}:
+                    raise ValueError(f"Workbook row {excel_row}: unsupported Class code {cohort_code!r}")
+                cohort = "control" if cohort_code.casefold() == "c" else "parkinson"
+                try:
+                    subject_int = int(subject_number)
+                except ValueError as exc:
+                    raise ValueError(f"Workbook row {excel_row}: invalid subject number {subject_number!r}") from exc
+                participant_id = f"{cohort}::subject {subject_int:02d}"
+                if participant_id in seen_participants:
+                    raise ValueError(f"Participant appears in more than one workbook fold: {participant_id}")
+                seen_participants.add(participant_id)
+                assignments.append({
+                    "participant_id": participant_id,
+                    "cohort": cohort,
+                    "subject_name": f"subject {subject_int:02d}",
+                    "workbook_fold_id": str(fold_id),
+                    "workbook_partition": "development" if fold_id <= 25 else "heldout_test",
+                    "workbook_class_code": cohort_code.casefold(),
+                    "workbook_age_code": age.casefold(),
+                    "workbook_gender_code": gender.casefold(),
+                    "workbook_excel_row": str(excel_row),
+                    "participant_position_in_fold": str(position),
+                    "source_workbook": workbook_path.name,
+                    "source_workbook_sha256": workbook_hash,
+                })
+    finally:
+        workbook.close()
+
     if seen_folds != set(range(1, 35)):
         raise ValueError(f"Expected workbook folds 1..34; found {sorted(seen_folds)}")
     if len(assignments) != EXPECTED_WORKBOOK_PARTICIPANTS:
@@ -185,8 +194,6 @@ def build_fold_outputs(
             f"{sorted(unexpected_extras)}"
         )
 
-
-
     participant_records = dict(participant_by_id)
     participant_records["control::subject 09"] = {
         "participant_id": "control::subject 09",
@@ -205,26 +212,30 @@ def build_fold_outputs(
     }
 
     label_by_drawing: dict[str, dict[str, str]] = {}
-    if labels_csv and Path(labels_csv).is_file():
-        for row in read_csv(labels_csv):
-            if row["drawing_id"] in label_by_drawing:
-                raise ValueError(f"Duplicate drawing_id in labels.csv: {row['drawing_id']}")
-            label_by_drawing[row["drawing_id"]] = row
+    if labels_csv is not None:
+        labels_path = Path(labels_csv)
+        if not labels_path.is_file():
+            raise FileNotFoundError(labels_path)
+        for row in read_csv(labels_path):
+            drawing_id = row.get("drawing_id", "")
+            if not drawing_id:
+                raise ValueError("labels.csv contains a row without drawing_id")
+            if drawing_id in label_by_drawing:
+                raise ValueError(f"Duplicate drawing_id in labels.csv: {drawing_id}")
+            label_by_drawing[drawing_id] = row
 
     split_rows: list[dict[str, str]] = []
     for participant_id, participant in sorted(participant_records.items()):
         assignment = assignment_by_id.get(participant_id)
         if participant_id in KNOWN_UNASSIGNED:
-            partition = "unassigned"
-            fold_id = ""
+            partition, fold_id = "unassigned", ""
             reason = KNOWN_UNASSIGNED[participant_id]
         elif assignment:
             fold_id = assignment["workbook_fold_id"]
             partition = assignment["workbook_partition"]
             reason = participant.get("eligibility_reason", "")
         else:
-            partition = "outside_workbook"
-            fold_id = ""
+            partition, fold_id = "outside_workbook", ""
             reason = "Participant directory is present in archive but is not listed in folding_TLO.xlsx."
         split_rows.append({
             "participant_id": participant_id,
@@ -240,12 +251,37 @@ def build_fold_outputs(
         })
     split_by_id = {row["participant_id"]: row for row in split_rows}
 
-    drawing_ids = [row["drawing_id"] for row in drawings]
+    drawing_ids = [row.get("drawing_id", "") for row in drawings]
+    if any(not value for value in drawing_ids):
+        raise ValueError("drawings.csv contains a row without drawing_id")
     if len(drawing_ids) != len(set(drawing_ids)):
         raise ValueError("drawings.csv contains duplicate drawing_id")
     for drawing in drawings:
-        if drawing["participant_id"] not in split_by_id:
-            raise ValueError(f"Drawing participant is missing from split roster: {drawing['participant_id']}")
+        if drawing.get("participant_id") not in split_by_id:
+            raise ValueError(f"Drawing participant is missing from split roster: {drawing.get('participant_id')}")
+        if not drawing.get("image_path", "").strip():
+            raise ValueError(f"drawings.csv is missing image_path for {drawing['drawing_id']}")
+
+    drawing_by_id = {row["drawing_id"]: row for row in drawings}
+    unknown_label_ids = set(label_by_drawing) - set(drawing_by_id)
+    if unknown_label_ids:
+        raise ValueError(
+            "labels.csv contains drawing_id values absent from drawings.csv: "
+            f"{sorted(unknown_label_ids)[:5]}"
+        )
+    if labels_csv is not None:
+        missing_label_ids = set(drawing_by_id) - set(label_by_drawing)
+        if missing_label_ids:
+            raise ValueError(
+                "labels.csv does not contain a label row for every PNG in drawings.csv: "
+                f"{sorted(missing_label_ids)[:5]}"
+            )
+    for drawing_id, label in label_by_drawing.items():
+        drawing = drawing_by_id[drawing_id]
+        if label.get("participant_id") and label["participant_id"] != drawing["participant_id"]:
+            raise ValueError(f"participant_id mismatch between drawings.csv and labels.csv for {drawing_id}")
+        if label.get("image_name") and label["image_name"] != drawing["image_name"]:
+            raise ValueError(f"image_name mismatch between drawings.csv and labels.csv for {drawing_id}")
 
     fold_manifest: list[dict[str, str]] = []
     fold_summaries: list[dict[str, str]] = []
@@ -277,6 +313,7 @@ def build_fold_outputs(
                 "participant_id": participant_id,
                 "cohort": drawing["cohort"],
                 "image_name": drawing["image_name"],
+                "image_path": drawing["image_path"],
                 "partition": split["partition"],
                 "workbook_fold_id": split["workbook_fold_id"],
                 "role": role,
@@ -286,23 +323,20 @@ def build_fold_outputs(
                 "image_sha256": drawing.get("image_sha256", ""),
                 "expert_label": label.get("expert_label", ""),
                 "label_status": label.get("label_status", "not_joined"),
-                "clinical_label_recorded": label.get("clinical_label_recorded", drawing["cohort"]),
+                "clinical_label_recorded": label.get("clinical_label_recorded", drawing.get("cohort", "")),
             }
             rows_for_fold.append(item)
             fold_manifest.append(item)
 
-
-        by_duplicate_group: dict[str, set[str]] = defaultdict(set)
+        duplicate_roles: dict[str, set[str]] = defaultdict(set)
         for row in rows_for_fold:
             if row["duplicate_group"] and _bool(row["cv_eligible"]) and row["role"] in {"train", "validation", "test_locked"}:
-                by_duplicate_group[row["duplicate_group"]].add(row["role"])
-        leaked = {key: sorted(value) for key, value in by_duplicate_group.items() if len(value) > 1}
+                duplicate_roles[row["duplicate_group"]].add(row["role"])
+        leaked = {key: sorted(value) for key, value in duplicate_roles.items() if len(value) > 1}
         if leaked:
             raise ValueError(f"Duplicate-content leakage in fold {fold_id}: {leaked}")
 
-        validation_participants = [
-            row for row in assignments if int(row["workbook_fold_id"]) == fold_id
-        ]
+        validation_participants = [row for row in assignments if int(row["workbook_fold_id"]) == fold_id]
         validation_ids = {row["participant_id"] for row in validation_participants}
         validation_rows = [row for row in rows_for_fold if row["participant_id"] in validation_ids]
         train_rows = [row for row in rows_for_fold if row["role"] == "train" and _bool(row["cv_eligible"])]
@@ -321,8 +355,8 @@ def build_fold_outputs(
         train_parkinson = sum(row["cohort"] == "parkinson" for row in train_rows)
         test_control = sum(row["cohort"] == "control" for row in test_eligible)
         test_parkinson = sum(row["cohort"] == "parkinson" for row in test_eligible)
-
         status = "empty_validation" if not validation_eligible else "ready"
+
         fold_summaries.append({
             "development_model_fold": str(fold_id),
             "validation_participants_assigned": str(len(validation_participants)),
@@ -344,7 +378,7 @@ def build_fold_outputs(
             "test_control_images_eligible": str(test_control),
             "test_parkinson_images_eligible": str(test_parkinson),
             "status": status,
-            "note": "No validation images: keep Fold 22 in the protocol but do not calculate a score or ensemble weight." if status == "empty_validation" else "",
+            "note": "No validation images: keep Fold 22 in the 25-fold protocol but do not calculate a score or ensemble weight." if status == "empty_validation" else "",
             "source_workbook_sha256": workbook_hash,
         })
 
@@ -355,7 +389,6 @@ def build_fold_outputs(
     write_csv(output_dir / "fold_manifest.csv", fold_manifest)
     write_csv(output_dir / "fold_summary.csv", fold_summaries)
 
-    # Aggregate counts at participant and image level.
     def count_partition(partition: str) -> dict[str, int]:
         selected = [row for row in split_rows if row["partition"] == partition]
         return {
@@ -380,6 +413,8 @@ def build_fold_outputs(
         "participant_roster_rows_in_splits": len(split_rows),
         "drawing_rows_per_development_fold": len(drawings),
         "fold_manifest_rows": len(fold_manifest),
+        "label_rows_joined": len(label_by_drawing),
+        "label_rows_missing_for_drawings": len(set(drawing_ids) - set(label_by_drawing)),
         "partition_counts": dict(Counter(row["partition"] for row in split_rows)),
         "development": {
             **count_partition("development"),
@@ -393,10 +428,7 @@ def build_fold_outputs(
             "raw_images": drawing_by_partition["heldout_test"],
             "cv_eligible_images_after_duplicate_quarantine": eligible_by_partition["heldout_test"],
         },
-        "unassigned": {
-            **count_partition("unassigned"),
-            "raw_images": drawing_by_partition["unassigned"],
-        },
+        "unassigned": {**count_partition("unassigned"), "raw_images": drawing_by_partition["unassigned"]},
         "outside_workbook": count_partition("outside_workbook"),
         "workbook_identities_missing_from_archive": sorted(missing_from_archive),
         "empty_validation_folds": [
@@ -447,7 +479,7 @@ def build_fold_outputs(
          "decision": "Kept outside development and held-out test.",
          "impact": "Its one image is preserved but excluded from CV partitions."},
         {"decision_id": "DUP-01", "topic": "Control Subject 36", "status": "unassigned_pending_identity_adjudication",
-         "decision": "Shares three exact PNG contents with Control Subject 34.",
+         "decision": "Shares three exact PNG contents with Control subject 34.",
          "impact": "Subject 36 and its three images remain outside development and held-out test."},
         {"decision_id": "DUP-02", "topic": "Within-participant exact duplicate PNGs", "status": "quarantined",
          "decision": "Both copies of the Control 06 and Parkinson 08 duplicate pairs are quarantined.",
@@ -466,6 +498,7 @@ def validate_fold_outputs(output_dir: Path) -> dict:
     assignments = read_csv(output_dir / "fold_assignments.csv")
     manifest = read_csv(output_dir / "fold_manifest.csv")
     summary = read_csv(output_dir / "fold_summary.csv")
+
     if len(assignments) != EXPECTED_WORKBOOK_PARTICIPANTS:
         raise ValueError("fold_assignments.csv must contain 68 workbook-listed participants")
     if len(summary) != 25 or {int(row["development_model_fold"]) for row in summary} != set(DEVELOPMENT_FOLDS):
@@ -479,9 +512,19 @@ def validate_fold_outputs(output_dir: Path) -> dict:
         raise ValueError(f"Expected one archive-only participant outside workbook, got {counts['outside_workbook']}")
     if len(splits) != 71:
         raise ValueError(f"Expected 71 roster rows (68 workbook + 2 unassigned + 1 archive-only); got {len(splits)}")
+
     c09 = [row for row in splits if row["participant_id"] == "control::subject 09"]
     if len(c09) != 1 or c09[0]["partition"] != "heldout_test" or int(c09[0]["n_png"]) != 0:
         raise ValueError("Control subject 09 must remain in the workbook test roster with zero images")
+
+    required_manifest_columns = {
+        "development_model_fold", "drawing_id", "participant_id", "image_path", "role", "cv_eligible"
+    }
+    missing_columns = required_manifest_columns - set(manifest[0] if manifest else [])
+    if missing_columns:
+        raise ValueError(f"fold_manifest.csv is missing required columns: {sorted(missing_columns)}")
+    if any(not row["image_path"].strip() for row in manifest):
+        raise ValueError("fold_manifest.csv contains rows with empty image_path")
     if len(manifest) % 25 != 0:
         raise ValueError("fold_manifest.csv must contain the same drawing roster for each of 25 folds")
     rows_per_fold = Counter(row["development_model_fold"] for row in manifest)
@@ -489,25 +532,35 @@ def validate_fold_outputs(output_dir: Path) -> dict:
         raise ValueError("Each development fold must contain the same complete drawing roster")
 
     by_fold: dict[int, list[dict[str, str]]] = defaultdict(list)
+    paths_by_drawing: dict[str, set[str]] = defaultdict(set)
     for row in manifest:
         fold_id = int(row["development_model_fold"])
         by_fold[fold_id].append(row)
+        paths_by_drawing[row["drawing_id"]].add(row["image_path"])
         if row["partition"] == "heldout_test" and row["role"] not in {"test_locked", "quarantined"}:
             raise ValueError("A held-out test image leaked into train/validation")
         if row["partition"] == "development" and row["role"] == "test_locked":
             raise ValueError("A development image was incorrectly marked test_locked")
+    inconsistent_paths = {drawing_id: paths for drawing_id, paths in paths_by_drawing.items() if len(paths) != 1}
+    if inconsistent_paths:
+        raise ValueError(f"Image paths changed across development folds: {list(inconsistent_paths)[:5]}")
+
     for fold_id, fold_rows in by_fold.items():
+        drawing_ids = [row["drawing_id"] for row in fold_rows]
+        if len(drawing_ids) != len(set(drawing_ids)):
+            raise ValueError(f"Duplicate drawing_id rows in development fold {fold_id}")
         role_by_participant: dict[str, set[str]] = defaultdict(set)
         duplicate_roles: dict[str, set[str]] = defaultdict(set)
         for row in fold_rows:
             if _bool(row["cv_eligible"]) and row["role"] in {"train", "validation", "test_locked"}:
                 role_by_participant[row["participant_id"]].add(row["role"])
-                if row["duplicate_group"]:
+                if row.get("duplicate_group"):
                     duplicate_roles[row["duplicate_group"]].add(row["role"])
         if any(len(roles) > 1 for roles in role_by_participant.values()):
             raise ValueError(f"Participant leakage in fold {fold_id}")
         if any(len(roles) > 1 for roles in duplicate_roles.values()):
             raise ValueError(f"Duplicate-content leakage in fold {fold_id}")
+
     empty = [int(row["development_model_fold"]) for row in summary if row["status"] == "empty_validation"]
     if empty != [22]:
         raise ValueError(f"Expected only Fold 22 to have empty validation; found {empty}")
@@ -520,4 +573,6 @@ def validate_fold_outputs(output_dir: Path) -> dict:
         "outside_workbook_participants": 1,
         "empty_validation_folds": empty,
         "fold_manifest_rows": len(manifest),
+        "unique_drawings": len(paths_by_drawing),
+        "image_paths_present": True,
     }

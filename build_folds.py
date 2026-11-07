@@ -18,9 +18,21 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=Path("datasets/annotations"))
     args = parser.parse_args()
 
+    for name, path in (
+        ("workbook", args.workbook),
+        ("participants", args.participants),
+        ("drawings", args.drawings),
+        ("labels", args.labels),
+    ):
+        if not path.is_file():
+            parser.error(f"{name} file not found: {path}")
+
     report = build_fold_outputs(
-        args.participants, args.drawings, args.workbook, args.output_dir,
-        labels_csv=args.labels if args.labels.is_file() else None,
+        args.participants,
+        args.drawings,
+        args.workbook,
+        args.output_dir,
+        labels_csv=args.labels,
     )
     print(json.dumps(report, ensure_ascii=False, indent=2))
 

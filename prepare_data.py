@@ -9,7 +9,7 @@ def main() -> None:
     )
     parser.parse_args()
     parser.error(
-        "Random splitting is disabled for this thesis. Run:\n"
+        "Random splitting is disabled for this thesis. Use the current workflow:\n"
         "  python audit_data.py --control-zip control.zip --parkinson-zip parkinson.zip\n"
         "  python finalize_labels.py --control-csv complete_control.csv --parkinson-csv complete_parkinson.csv\n"
         "  python build_folds.py --workbook folding_TLO.xlsx"

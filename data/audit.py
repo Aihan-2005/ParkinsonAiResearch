@@ -11,6 +11,8 @@ from pathlib import Path, PurePosixPath
 
 from PIL import Image
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 KNOWN_UNASSIGNED = {
     "control::subject 36": "cross_participant_duplicate_identity_pending_review",
     "parkinson::subject 31": "clinical_diagnosis_correction_pending",
@@ -19,6 +21,15 @@ KNOWN_UNASSIGNED = {
 
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _manifest_path(path: Path) -> str:
+    """Store project-relative paths when possible, otherwise an absolute path."""
+    resolved = Path(path).expanduser().resolve()
+    try:
+        return resolved.relative_to(PROJECT_ROOT).as_posix()
+    except ValueError:
+        return resolved.as_posix()
 
 
 def _safe_member_parts(member_name: str, expected_cohort: str) -> tuple[str, str] | None:
@@ -54,7 +65,8 @@ def audit_archives(
     extract: bool = True,
 ) -> dict:
 
- 
+  
+
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     raw_root = Path(raw_root) if raw_root is not None else output_dir.parent / "raw"
@@ -62,7 +74,6 @@ def audit_archives(
     participants: dict[str, dict] = {}
     drawings: list[dict] = []
     traces: list[dict] = []
-    image_bytes_by_drawing: dict[str, bytes] = {}
 
     for cohort, archive_path in (("control", Path(control_zip)), ("parkinson", Path(parkinson_zip))):
         if not archive_path.is_file():
@@ -97,16 +108,19 @@ def audit_archives(
                 if (info.external_attr >> 16) & 0o170000 == 0o120000:
                     raise ValueError(f"Symlink archive member refused: {member}")
 
-                suffix = PurePosixPath(member).suffix.casefold()
+                member_path = PurePosixPath(member)
+                suffix = member_path.suffix.casefold()
                 if suffix not in {".png", ".txt"}:
                     continue
-                if len(PurePosixPath(member).parts) < 4 or PurePosixPath(member).parts[-2].casefold() != "spiral":
+                if len(member_path.parts) < 4 or member_path.parts[-2].casefold() != "spiral":
                     continue
+
                 payload = archive.read(info)
-                destination = raw_root / cohort / subject / "spiral" / PurePosixPath(member).name
+                destination = raw_root / cohort / subject / "spiral" / member_path.name
                 if extract:
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     destination.write_bytes(payload)
+                manifest_path = _manifest_path(destination)
 
                 if suffix == ".png":
                     try:
@@ -117,17 +131,17 @@ def audit_archives(
                             width, height, mode = image.width, image.height, image.mode
                     except Exception as exc:
                         raise ValueError(f"Unreadable PNG {member}: {exc}") from exc
-                    drawing_id = f"{participant_id}::{PurePosixPath(member).name}"
+
+                    drawing_id = f"{participant_id}::{member_path.name}"
                     image_hash = _sha256(payload)
-                    image_bytes_by_drawing[drawing_id] = payload
                     participants[participant_id]["n_png"] += 1
                     drawings.append({
                         "drawing_id": drawing_id,
                         "participant_id": participant_id,
                         "cohort": cohort,
                         "subject_name": subject,
-                        "image_name": PurePosixPath(member).name,
-                        "image_path": (Path("datasets") / "raw" / cohort / subject / "spiral" / PurePosixPath(member).name).as_posix(),
+                        "image_name": member_path.name,
+                        "image_path": manifest_path,
                         "image_sha256": image_hash,
                         "size_bytes": str(len(payload)),
                         "width": str(width),
@@ -144,18 +158,17 @@ def audit_archives(
                 else:
                     participants[participant_id]["n_txt"] += 1
                     traces.append({
-                        "trace_id": f"{participant_id}::{PurePosixPath(member).name}",
+                        "trace_id": f"{participant_id}::{member_path.name}",
                         "participant_id": participant_id,
                         "cohort": cohort,
                         "subject_name": subject,
-                        "trace_name": PurePosixPath(member).name,
-                        "trace_path": (Path("datasets") / "raw" / cohort / subject / "spiral" / PurePosixPath(member).name).as_posix(),
+                        "trace_name": member_path.name,
+                        "trace_path": manifest_path,
                         "trace_sha256": _sha256(payload),
                         "trace_pair_status": "unverified_no_explicit_drawing_id",
                         "duplicate_group": "",
                         "duplicate_scope": "",
                     })
-
 
     by_hash: dict[str, list[dict]] = defaultdict(list)
     for row in drawings:
@@ -184,7 +197,6 @@ def audit_archives(
             "resolution_status": "pending_manual_adjudication_no_source_rows_deleted",
         })
 
-
     for participant_id, reason in KNOWN_UNASSIGNED.items():
         if participant_id not in participants:
             raise ValueError(f"Expected known unassigned participant missing from archive: {participant_id}")
@@ -200,22 +212,21 @@ def audit_archives(
             row["eligibility_reason"] = "Participant exists in archive metadata but has no PNG spiral."
         elif row["eligibility_status"] != "unassigned":
             row["eligibility_status"] = "pending_workbook_assignment"
-        if n_png != n_txt:
-            row["file_count_note"] = "PNG/TXT counts differ; no pairing inferred."
-        else:
-            row["file_count_note"] = "Equal counts do not prove PNG/TXT pairing."
-
+        row["file_count_note"] = (
+            "PNG/TXT counts differ; no pairing inferred."
+            if n_png != n_txt
+            else "Equal counts do not prove PNG/TXT pairing."
+        )
 
     for drawing in drawings:
-        p_status = participants[drawing["participant_id"]]["eligibility_status"]
-        if p_status == "unassigned":
+        participant = participants[drawing["participant_id"]]
+        if participant["eligibility_status"] == "unassigned":
             drawing["cv_eligible"] = "false"
-            drawing["eligibility_reason"] = participants[drawing["participant_id"]]["eligibility_reason"]
+            drawing["eligibility_reason"] = participant["eligibility_reason"]
 
-    participant_rows = sorted(participants.values(), key=lambda r: r["participant_id"])
-    drawing_rows = sorted(drawings, key=lambda r: r["drawing_id"])
-    trace_rows = sorted(traces, key=lambda r: r["trace_id"])
-
+    participant_rows = sorted(participants.values(), key=lambda row: row["participant_id"])
+    drawing_rows = sorted(drawings, key=lambda row: row["drawing_id"])
+    trace_rows = sorted(traces, key=lambda row: row["trace_id"])
 
     trace_by_hash: dict[str, list[dict]] = defaultdict(list)
     for row in trace_rows:
@@ -243,35 +254,16 @@ def audit_archives(
     _write_csv(output_dir / "participants.csv", participant_rows)
     _write_csv(output_dir / "drawings.csv", drawing_rows)
     _write_csv(output_dir / "trace_inventory.csv", trace_rows)
-    _write_csv(output_dir / "duplicate_ledger.csv", duplicate_ledger)
-    _write_csv(output_dir / "trace_duplicate_ledger.csv", trace_duplicate_ledger)
-
-    assignment_template = []
-    for participant in participant_rows:
-        is_unassigned = participant["eligibility_status"] == "unassigned"
-        assignment_template.append({
-            "participant_id": participant["participant_id"],
-            "cohort": participant["cohort"],
-            "subject_name": participant["subject_name"],
-            "workbook_fold_id": "",
-            "expected_partition": "unassigned" if is_unassigned else "",
-            "notes": participant["eligibility_reason"] or "Fill workbook_fold_id from the approved folding_TLO workbook; do not infer it.",
-        })
-    _write_csv(output_dir / "fold_assignments_template.csv", assignment_template)
-
-    fold_template = []
-    for fold_id in range(1, 26):
-        fold_template.append({
-            "validation_fold_id": str(fold_id),
-            "expected_validation_participants": "2",
-            "expected_control_participants": "1",
-            "expected_parkinson_participants": "1",
-            "current_export_status": (
-                "known_empty_validation_no_images" if fold_id == 22 else "awaiting_workbook_mapping"
-            ),
-            "note": "Fold 22 must remain in the 25-fold protocol; do not fabricate validation predictions or weights." if fold_id == 22 else "",
-        })
-    _write_csv(output_dir / "fold_summary_template.csv", fold_template)
+    _write_csv(
+        output_dir / "duplicate_ledger.csv",
+        duplicate_ledger,
+        fieldnames=["duplicate_group", "sha256", "duplicate_scope", "member_count", "participant_ids", "drawing_ids", "resolution_status"],
+    )
+    _write_csv(
+        output_dir / "trace_duplicate_ledger.csv",
+        trace_duplicate_ledger,
+        fieldnames=["duplicate_group", "sha256", "duplicate_scope", "member_count", "participant_ids", "trace_ids", "resolution_status"],
+    )
 
     report = {
         "archives": {
@@ -291,7 +283,8 @@ def audit_archives(
         "duplicate_trace_files": sum(int(row["member_count"]) for row in trace_duplicate_ledger),
         "known_unassigned_participants": KNOWN_UNASSIGNED,
         "trace_pairing": "not inferred; equal file counts and sorted order are insufficient",
-        "fold_assignment_status": "pending_missing_folding_TLO_workbook_or_normalized_mapping_csv",
+        "image_path_policy": "project-relative when inside repository; absolute when raw_root is outside repository",
+        "fold_assignment_status": "pending_folding_TLO_workbook",
         "folds_required": list(range(1, 26)),
         "test_workbook_fold_ids": list(range(26, 35)),
     }
