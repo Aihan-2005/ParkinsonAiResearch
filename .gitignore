@@ -1,0 +1,24 @@
+
+
+/datasets/
+
+
+/outputs/
+*.pt
+*.pth
+*.ckpt
+
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+
+.idea/
+.vscode/
+.DS_Store
+
+# Temporary files
+*.tmp
