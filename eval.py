@@ -6,8 +6,10 @@ from pathlib import Path
 import torch
 
 from config import DATA, ROOT_DIR
-from data.dataset import make_loader
+from data.dataloader import make_loader
 from model import build_model
+from config import PreprocessingConfig
+from data.dataloader import build_eval_transform
 from utils.io import sha256_file, write_json
 from utils.loops import run_epoch, select_device
 
@@ -45,6 +47,18 @@ def main() -> None:
         )
 
     classes = tuple(checkpoint["class_names"])
+    preprocessing = checkpoint.get("preprocessing")
+    if preprocessing is None:
+        parser.error("Checkpoint has no versioned preprocessing configuration. Retrain with the B1 input pipeline.")
+    try:
+        preprocessing_config = PreprocessingConfig.from_dict(preprocessing["config"])
+        if preprocessing_config.fingerprint != preprocessing["sha256"]:
+            raise ValueError("Preprocessing configuration hash mismatch")
+        if preprocessing_config.image_size != checkpoint["image_size"]:
+            raise ValueError("Checkpoint image size disagrees with preprocessing configuration")
+    except (ValueError, TypeError, KeyError) as exc:
+        parser.error(f"Invalid checkpoint preprocessing: {exc}")
+    eval_transform = build_eval_transform(preprocessing_config)
     loader = make_loader(
         fold_id=fold_id,
         split=args.split,
@@ -53,6 +67,7 @@ def main() -> None:
         label_source=checkpoint["label_source"],
         image_size=checkpoint["image_size"],
         batch_size=args.batch_size,
+        transform=eval_transform,
     )
     if tuple(loader.dataset.class_names) != classes:
         parser.error("Checkpoint and dataset label definitions disagree")
@@ -75,6 +90,7 @@ def main() -> None:
         "trained_epoch": checkpoint["epoch"],
         "selection_policy": checkpoint.get("selection_policy", "unknown"),
         "metrics": metrics,
+        "preprocessing": eval_transform.metadata(),
     }
     report_path = ROOT_DIR / "outputs" / f"evaluation_{args.checkpoint.stem}_{args.split}.json"
     write_json(report_path, output)

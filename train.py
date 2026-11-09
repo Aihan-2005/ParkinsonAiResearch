@@ -7,8 +7,10 @@ from pathlib import Path
 import torch
 
 from config import CLASS_NAMES, DATA, MODEL, ROOT_DIR, TRAIN
-from data.dataset import make_loader
+from data.dataloader import make_loader
 from model import build_model
+from config import PreprocessingConfig
+from data.dataloader import build_eval_transform, build_train_transform
 from utils.io import sha256_file, write_json
 from utils.loops import run_epoch, select_device
 from utils.reproducibility import seed_everything
@@ -46,6 +48,10 @@ def main() -> None:
         parser.error(f"Fold manifest not found: {DATA.fold_manifest_path}. Run build_folds.py first.")
 
     seed_everything(args.seed)
+    preprocessing_config = PreprocessingConfig(image_size=args.image_size)
+    train_transform = build_train_transform(preprocessing_config)
+    eval_transform = build_eval_transform(preprocessing_config)
+    preprocessing_metadata = train_transform.metadata()
     device = select_device(args.device)
     classes = CLASS_NAMES if args.label_source == "consensus" else CLASS_NAMES[:2]
 
@@ -57,9 +63,10 @@ def main() -> None:
         image_size=args.image_size,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+        seed=args.seed,
     )
-    train_loader = make_loader(split="train", **loader_kwargs)
-    val_loader = make_loader(split="val", allow_empty=True, **loader_kwargs)
+    train_loader = make_loader(split="train", transform=train_transform, **loader_kwargs)
+    val_loader = make_loader(split="val", transform=eval_transform, allow_empty=True, **loader_kwargs)
     if len(train_loader.dataset) == 0:
         parser.error(f"Fold {args.fold_id} has no eligible training images")
     validation_available = len(val_loader.dataset) > 0
@@ -120,6 +127,7 @@ def main() -> None:
                     "num_classes": len(classes),
                     "label_source": args.label_source,
                     "image_size": args.image_size,
+                    "preprocessing": preprocessing_metadata,
                     "fold_id": args.fold_id,
                     "fold_manifest_sha256": manifest_hash,
                     "seed": args.seed,
@@ -143,6 +151,7 @@ def main() -> None:
             "num_classes": len(classes),
             "label_source": args.label_source,
             "image_size": args.image_size,
+            "preprocessing": preprocessing_metadata,
             "fold_id": args.fold_id,
             "fold_manifest_sha256": manifest_hash,
             "seed": args.seed,
@@ -154,7 +163,8 @@ def main() -> None:
         _save_checkpoint(checkpoint_path, checkpoint)
         checkpoint_saved = True
 
-    write_json(history_path, {"run": run_name, "fold_id": args.fold_id, "history": history})
+    write_json(history_path, {"run": run_name, "fold_id": args.fold_id,
+                              "preprocessing": preprocessing_metadata, "history": history})
     if checkpoint_saved:
         print(f"Saved checkpoint: {checkpoint_path}")
     print("Held-out test labels must not be used for model selection. Use eval.py only for the planned final evaluation.")

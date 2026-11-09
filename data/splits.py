@@ -46,6 +46,7 @@ def assert_no_subject_leakage(
 
     participant_roles: dict[str, set[str]] = defaultdict(set)
     duplicate_roles: dict[str, set[str]] = defaultdict(set)
+    hash_roles: dict[str, set[str]] = defaultdict(set)
     for row in selected:
         if not _as_bool(row.get("cv_eligible", "true")):
             continue
@@ -61,6 +62,9 @@ def assert_no_subject_leakage(
         duplicate_group = str(row.get("duplicate_group", "")).strip()
         if duplicate_group:
             duplicate_roles[duplicate_group].add(role)
+        content_hash = str(row.get("image_sha256", "")).strip()
+        if content_hash:
+            hash_roles[content_hash].add(role)
 
     participant_leaks = {
         participant: sorted(roles)
@@ -77,6 +81,8 @@ def assert_no_subject_leakage(
     }
     if duplicate_leaks:
         raise ValueError(f"Duplicate-content leakage in fold {fold_id or 'selected'}: {duplicate_leaks}")
+    if any(len(roles) > 1 for roles in hash_roles.values()):
+        raise ValueError(f"Duplicate-content leakage by image SHA-256 in fold {fold_id or 'selected'}")
 
     return {
         "status": "ok",

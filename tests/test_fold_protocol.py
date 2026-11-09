@@ -77,6 +77,7 @@ def test_builds_25_folds_and_keeps_missing_c09_and_test_locked(tmp_path):
                 "participant_id": pid,
                 "cohort": item["cohort"],
                 "image_name": "image.png",
+                "image_path": f"datasets/raw/{pid.replace('::', '/')}/spiral/image.png",
                 "cv_eligible": "true",
                 "duplicate_group": "",
                 "duplicate_scope": "",
@@ -142,6 +143,7 @@ def test_rejects_duplicate_content_leakage(tmp_path):
             drawings.append({
                 "drawing_id": f"{pid}::image.png", "participant_id": pid,
                 "cohort": item["cohort"], "image_name": "image.png",
+                "image_path": f"datasets/raw/{pid.replace('::', '/')}/spiral/image.png",
                 "cv_eligible": "true", "duplicate_group": "", "duplicate_scope": "",
                 "image_sha256": "hash-" + pid,
             })
