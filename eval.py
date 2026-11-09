@@ -14,7 +14,7 @@ from utils.losses import build_loss
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate a saved fold checkpoint.")
+    parser = argparse.ArgumentParser(description="Evaluate a saved development-fold checkpoint.")
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--device", default="auto")
@@ -22,7 +22,7 @@ def main() -> None:
     parser.add_argument("--fold-id", type=int, choices=range(1, 26), default=None)
     parser.add_argument("--manifest", type=Path, default=DATA.fold_manifest_path)
     parser.add_argument("--confirm-heldout-test", action="store_true",
-                        help="Required before evaluating the locked test partition.")
+                        help="Required before the separately planned final test evaluation.")
     parser.add_argument("--allow-manifest-mismatch", action="store_true")
     args = parser.parse_args()
 
@@ -30,6 +30,8 @@ def main() -> None:
         parser.error("batch-size must be positive")
     if args.split == "test" and not args.confirm_heldout_test:
         parser.error("Test is locked. Add --confirm-heldout-test only for the planned final evaluation.")
+    if args.split == "test" and args.allow_manifest_mismatch:
+        parser.error("A locked-test evaluation cannot bypass the checkpoint/manifest hash check.")
     if not args.checkpoint.is_file():
         parser.error(f"Checkpoint not found: {args.checkpoint}")
     if not args.manifest.is_file():
@@ -38,13 +40,16 @@ def main() -> None:
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
     if "fold_id" not in checkpoint or "fold_manifest_sha256" not in checkpoint:
         parser.error("Checkpoint is not from the fold-aware pipeline.")
+    if "projection.weight" in checkpoint.get("model_state_dict", {}):
+        parser.error("This is a legacy 64-D joint-head checkpoint; retrain with the separated 2048-D CV baseline.")
+
     fold_id = int(checkpoint["fold_id"])
     if args.fold_id is not None and args.fold_id != fold_id:
         parser.error(f"Requested fold {args.fold_id} does not match checkpoint fold {fold_id}")
 
     present_hash = sha256_file(args.manifest)
     if checkpoint["fold_manifest_sha256"] != present_hash and not args.allow_manifest_mismatch:
-        parser.error("fold_manifest.csv changed after training; retrain or explicitly allow the mismatch.")
+        parser.error("fold_manifest.csv changed after training; retrain or explicitly allow the mismatch for development validation.")
 
     preprocessing = checkpoint.get("preprocessing")
     if preprocessing is None:
@@ -77,15 +82,19 @@ def main() -> None:
     if tuple(loader.dataset.class_names) != classes:
         parser.error("Checkpoint and dataset label definitions disagree")
 
+    freeze_policy = checkpoint.get("freeze_policy")
+    if freeze_policy is None:
+        freeze_policy = "all" if checkpoint.get("backbone_frozen", False) else "early"
+
     model = build_model(
         architecture=checkpoint["architecture"],
         num_classes=checkpoint["num_classes"],
         pretrained=False,
-        embedding_dim=int(checkpoint.get("embedding_dim", 64)),
-        freeze_backbone=bool(checkpoint.get("backbone_frozen", False)),
+        freeze_policy=freeze_policy,
     )
     model.load_state_dict(checkpoint["model_state_dict"], strict=True)
-    model = model.to(select_device(args.device))
+    device = select_device(args.device)
+    model = model.to(device)
 
     loss_config = checkpoint.get("loss", {"name": "cross_entropy"})
     gamma_value = loss_config.get("gamma")
@@ -93,12 +102,12 @@ def main() -> None:
         loss_config.get("name", "cross_entropy"),
         alpha=loss_config.get("alpha"),
         gamma=2.0 if gamma_value is None else float(gamma_value),
-    ).to(next(model.parameters()).device)
+    ).to(device)
 
     metrics = run_epoch(
         model=model,
         loader=loader,
-        device=next(model.parameters()).device,
+        device=device,
         class_names=classes,
         criterion=criterion,
     )
@@ -111,6 +120,8 @@ def main() -> None:
         "selection_policy": checkpoint.get("selection_policy", "unknown"),
         "metrics": metrics,
         "preprocessing": transform.metadata(),
+        "fold_manifest_sha256": checkpoint["fold_manifest_sha256"],
+        "freeze_policy": freeze_policy,
     }
     report_path = ROOT_DIR / "outputs" / f"evaluation_{args.checkpoint.stem}_{args.split}.json"
     write_json(report_path, output)

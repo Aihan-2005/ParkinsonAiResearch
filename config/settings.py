@@ -14,8 +14,8 @@ CLASS_TO_INDEX = {name: idx for idx, name in enumerate(CLASS_NAMES)}
 class ModelConfig:
     architecture: str = "wide_resnet50_2"
     pretrained: bool = True
-    embedding_dim: int = 64
-    freeze_backbone: bool = True
+    
+    freeze_policy: str = "early"
     num_classes: int = len(CLASS_NAMES)
 
 
