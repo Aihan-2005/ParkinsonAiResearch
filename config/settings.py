@@ -12,15 +12,18 @@ CLASS_TO_INDEX = {name: idx for idx, name in enumerate(CLASS_NAMES)}
 
 @dataclass(frozen=True)
 class ModelConfig:
-    architecture: str = "resnet18"
-    pretrained: bool = False
+    architecture: str = "wide_resnet50_2"
+    pretrained: bool = True
+    embedding_dim: int = 64
+    freeze_backbone: bool = True
     num_classes: int = len(CLASS_NAMES)
 
 
 @dataclass(frozen=True)
 class TrainConfig:
     epochs: int = 15
-    lr: float = 3e-4
+    lr: float = 1e-3
+    backbone_lr: float = 1e-5
     weight_decay: float = 1e-4
     seed: int = 42
     device: str = "auto"

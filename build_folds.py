@@ -4,14 +4,18 @@ import argparse
 import json
 from pathlib import Path
 
-from data.fold_protocol import build_fold_outputs
+from data.fold_protocol_current import build_fold_outputs
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Build 25 development folds and a locked test set from folding_TLO.xlsx."
+        description="Build the 25 development folds and locked test roster for the confirmed current dataset."
     )
-    parser.add_argument("--workbook", type=Path, default=Path("folding_TLO.xlsx"))
+    parser.add_argument(
+        "--workbook",
+        type=Path,
+        default=Path("datasets/annotations/folding_TLO.xlsx"),
+    )
     parser.add_argument("--participants", type=Path, default=Path("datasets/annotations/participants.csv"))
     parser.add_argument("--drawings", type=Path, default=Path("datasets/annotations/drawings.csv"))
     parser.add_argument("--labels", type=Path, default=Path("datasets/annotations/labels.csv"))
