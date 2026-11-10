@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import math
@@ -43,16 +44,14 @@ def _optimizer_for_model(
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Train one independent TLO development fold with a WideResNet50-2 "
-            "three-class classifier. The locked test partition is never loaded."
+            "Train one independent TLO development fold with WideResNet50-2. "
+            "Only folds 1..25 are accepted; held-out test rows are never loaded."
         )
     )
     parser.add_argument("--fold-id", type=int, choices=range(1, 26), required=True)
     parser.add_argument("--architecture", choices=("wide_resnet50_2",), default=MODEL.architecture)
     parser.add_argument("--pretrained", action=argparse.BooleanOptionalAction, default=MODEL.pretrained)
-    parser.add_argument("--freeze-policy", choices=("all", "early", "final_block", "none"), default=None)
-    # Compatibility with the previous push's boolean switch.
-    parser.add_argument("--freeze-backbone", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--freeze-policy", choices=("early", "all"), default=None)
     parser.add_argument("--label-source", choices=("consensus", "real"), default="consensus")
     parser.add_argument("--loss", choices=("cross_entropy", "focal"), default="cross_entropy")
     parser.add_argument("--focal-gamma", type=float, default=2.0)
@@ -69,24 +68,135 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest", type=Path, default=DATA.fold_manifest_path)
     parser.add_argument("--root", type=Path, default=ROOT_DIR)
     parser.add_argument("--checkpoint-dir", type=Path, default=TRAIN.checkpoint_dir)
-    parser.add_argument("--resume-from", type=Path, default=None,
-                        help="Resume from a matching last.pt checkpoint; best.pt is not resumable.")
-    parser.add_argument("--resume", action="store_true",
-                        help="Automatically resume this run from its matching last.pt if present; skip if complete.")
-    parser.add_argument("--overwrite", action="store_true",
-                        help="Start a fresh run after deleting existing outputs for this exact run configuration.")
+    parser.add_argument(
+        "--resume-from", type=Path, default=None,
+        help="Resume from a matching last.pt checkpoint; best.pt is not used.",
+    )
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="Resume from this run's last.pt; if already complete, export final-epoch validation predictions.",
+    )
+    parser.add_argument(
+        "--overwrite", action="store_true",
+        help="Delete outputs for this exact run configuration and start again.",
+    )
     return parser.parse_args()
+
+
+def _write_validation_artifacts(
+    *,
+    predictions: list[dict],
+    metrics: dict | None,
+    validation_available: bool,
+    val_label_counts: dict[str, int],
+    val_participant_ids: list[str],
+    classes: tuple[str, ...],
+    args: argparse.Namespace,
+    freeze_policy: str,
+    run_name: str,
+    config_digest: str,
+    manifest_hash: str,
+    final_epoch: int,
+    training_config: dict,
+    checkpoint_dir: Path,
+) -> tuple[Path, Path]:
+    output_dir = Path(checkpoint_dir).parent / "validation_predictions"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    prediction_path = output_dir / f"{run_name}_validation_predictions.csv"
+    report_path = output_dir / f"{run_name}_validation_report.json"
+
+    probability_columns = [f"prob_{name}" for name in classes]
+    fieldnames = [
+        "fold_id", "epoch", "run_name", "config_digest", "manifest_sha256",
+        "label_source", "loss", "freeze_policy", "seed",
+        "drawing_id", "participant_id", "image_name", "image_path",
+        "true_label", "predicted_label", *probability_columns,
+    ]
+    with prediction_path.open("w", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fieldnames)
+        writer.writeheader()
+        for item in predictions:
+            row = {
+                "fold_id": args.fold_id,
+                "epoch": final_epoch,
+                "run_name": run_name,
+                "config_digest": config_digest,
+                "manifest_sha256": manifest_hash,
+                "label_source": args.label_source,
+                "loss": args.loss,
+                "freeze_policy": freeze_policy,
+                "seed": args.seed,
+                "drawing_id": item["drawing_id"],
+                "participant_id": item["participant_id"],
+                "image_name": item["image_name"],
+                "image_path": item["image_path"],
+                "true_label": item["true_label"],
+                "predicted_label": item["predicted_label"],
+            }
+            for class_name in classes:
+                row[f"prob_{class_name}"] = item["probabilities"][class_name]
+            writer.writerow(row)
+
+    counts = {name: int(val_label_counts.get(name, 0)) for name in classes}
+    present = [name for name in classes if counts[name] > 0]
+    positive_support = [counts[name] for name in present]
+    min_positive_support = min(positive_support) if positive_support else 0
+
+    if not validation_available:
+        quality = "empty_validation"
+        note = "No eligible validation images. The fold remains in the 25-fold protocol, but has no score or OOF predictions."
+    elif len(present) == 1:
+        quality = "single_class"
+        note = "Only one class is represented. Per-fold metrics are descriptive and not representative of multiclass performance."
+    elif len(present) < len(classes):
+        quality = "partial_class_coverage"
+        note = "At least one class is absent. Per-fold multiclass metrics are not directly interpretable."
+    elif min_positive_support < 2:
+        quality = "rare_class_support"
+        note = "All classes occur, but at least one class has only one validation image; metrics are highly unstable."
+    elif len(predictions) < 10:
+        quality = "small_validation_set"
+        note = "Validation contains fewer than 10 images; treat per-fold metrics as descriptive only."
+    else:
+        quality = "class_covered"
+        note = "All configured classes are represented; still interpret results at the pooled out-of-fold level."
+
+    report = {
+        "status": "ok" if validation_available else "empty_validation",
+        "fold_id": args.fold_id,
+        "run_name": run_name,
+        "config_digest": config_digest,
+        "manifest_sha256": manifest_hash,
+        "architecture": args.architecture,
+        "pretrained": args.pretrained,
+        "freeze_policy": freeze_policy,
+        "label_source": args.label_source,
+        "loss": args.loss,
+        "focal_alpha_mode": args.focal_alpha_mode if args.loss == "focal" else None,
+        "seed": args.seed,
+        "epochs_requested": args.epochs,
+        "final_epoch": final_epoch,
+        "training_config": training_config,
+        "classes": list(classes),
+        "validation_images": len(predictions),
+        "validation_subjects_with_images": len(set(val_participant_ids)),
+        "validation_label_counts": counts,
+        "validation_classes_present": present,
+        "validation_classes_missing": [name for name in classes if name not in present],
+        "validation_min_positive_class_support": min_positive_support,
+        "validation_quality": quality,
+        "validation_note": note,
+        "selection_policy": "fixed_epoch_budget_final_checkpoint_no_validation_based_epoch_selection",
+        "metrics": metrics,
+        "prediction_file": prediction_path.name,
+    }
+    write_json(report_path, report)
+    return prediction_path, report_path
 
 
 def main() -> None:
     args = _parse_args()
-
-    if args.freeze_policy is not None and args.freeze_backbone is not None:
-        raise SystemExit("Pass --freeze-policy or --freeze-backbone, not both.")
-    if args.freeze_backbone is not None:
-        freeze_policy = "all" if args.freeze_backbone else "none"
-    else:
-        freeze_policy = args.freeze_policy or MODEL.freeze_policy
+    freeze_policy = args.freeze_policy or MODEL.freeze_policy
 
     if min(args.epochs, args.batch_size, args.image_size) <= 0:
         raise SystemExit("epochs, batch-size and image-size must be positive")
@@ -137,11 +247,13 @@ def main() -> None:
     train_label_counts = train_loader.dataset.label_counts()
     val_label_counts = val_loader.dataset.label_counts()
     validation_available = len(val_loader.dataset) > 0
+    val_participant_ids = [row["participant_id"] for row in val_loader.dataset.rows]
 
     if args.loss == "focal":
         if args.focal_alpha_mode == "uniform":
             alpha = [1.0] * len(classes)
         else:
+            # This uses training-fold labels only; validation labels are never used.
             alpha = inverse_frequency_alpha(train_label_counts, classes)
     else:
         alpha = None
@@ -165,7 +277,6 @@ def main() -> None:
         "seed": args.seed,
     }
     manifest_hash = sha256_file(args.manifest)
-
     config_digest = hashlib.sha256(
         json.dumps(training_config, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:8]
@@ -175,10 +286,14 @@ def main() -> None:
         f"_freeze-{freeze_policy}_fold{args.fold_id:02d}_seed{args.seed}"
         f"_cfg{config_digest}_m{manifest_hash[:8]}"
     )
+
     checkpoint_dir = Path(args.checkpoint_dir)
-    best_path = checkpoint_dir / f"{run_name}_best.pt"
+    best_path = checkpoint_dir / f"{run_name}_best.pt"  # Legacy output; never selected by this version.
     last_path = checkpoint_dir / f"{run_name}_last.pt"
     history_path = checkpoint_dir / f"{run_name}_history.json"
+    validation_dir = checkpoint_dir.parent / "validation_predictions"
+    prediction_path = validation_dir / f"{run_name}_validation_predictions.csv"
+    report_path = validation_dir / f"{run_name}_validation_report.json"
 
     resume_path = args.resume_from
     if args.resume:
@@ -187,9 +302,9 @@ def main() -> None:
     if resume_path is not None:
         resume_checkpoint = torch.load(resume_path, map_location="cpu", weights_only=True)
         if resume_checkpoint.get("checkpoint_kind") != "last":
-            raise SystemExit("Only a last.pt checkpoint can be resumed; best.pt is for model selection/inference.")
+            raise SystemExit("Only a last.pt checkpoint can be resumed; best.pt is not resumable.")
         if "optimizer_state_dict" not in resume_checkpoint:
-            raise SystemExit("This checkpoint has no optimizer state and cannot be resumed by the current training runner.")
+            raise SystemExit("This checkpoint has no optimizer state and cannot be resumed.")
         if int(resume_checkpoint.get("fold_id", -1)) != args.fold_id:
             raise SystemExit("Resume checkpoint fold_id does not match --fold-id")
         if resume_checkpoint.get("fold_manifest_sha256") != manifest_hash:
@@ -202,7 +317,6 @@ def main() -> None:
     model = build_model(
         architecture=args.architecture,
         num_classes=len(classes),
-        # The saved state fully replaces initialization weights when resuming.
         pretrained=(args.pretrained if resume_checkpoint is None else False),
         freeze_policy=freeze_policy,
     ).to(device)
@@ -214,14 +328,11 @@ def main() -> None:
     )
 
     history: list[dict] = []
-    best_score = float("-inf")
     start_epoch = 1
     if resume_checkpoint is not None:
         model.load_state_dict(resume_checkpoint["model_state_dict"], strict=True)
         optimizer.load_state_dict(resume_checkpoint["optimizer_state_dict"])
         history = list(resume_checkpoint.get("history", []))
-        saved_best = resume_checkpoint.get("best_val_macro_f1")
-        best_score = float(saved_best) if saved_best is not None else float("-inf")
         start_epoch = int(resume_checkpoint["epoch"]) + 1
         generator_state = resume_checkpoint.get("train_loader_generator_state")
         if generator_state is not None:
@@ -232,25 +343,75 @@ def main() -> None:
         cuda_rng_state = resume_checkpoint.get("cuda_rng_state_all")
         if cuda_rng_state is not None and torch.cuda.is_available():
             torch.cuda.set_rng_state_all(cuda_rng_state)
-        if start_epoch > args.epochs:
-            write_json(history_path, {
-                "run": run_name, "fold_id": args.fold_id, "training_config": training_config,
-                "loss": {"name": args.loss, "gamma": args.focal_gamma if args.loss == "focal" else None,
-                         "alpha_mode": args.focal_alpha_mode if args.loss == "focal" else None, "alpha": alpha},
-                "preprocessing": preprocessing_metadata, "history": history,
-            })
-            print(f"Run already complete at epoch {start_epoch - 1}; no additional training was needed.")
-            print(f"Last checkpoint: {last_path}")
-            return
-    elif not args.overwrite:
-        existing = [path for path in (best_path, last_path, history_path) if path.exists()]
+
+    def export_final_validation(final_epoch: int) -> None:
+        final_metrics = None
+        predictions: list[dict] = []
+        if validation_available:
+            result = run_epoch(
+                model=model,
+                loader=val_loader,
+                device=device,
+                class_names=classes,
+                criterion=criterion,
+                include_predictions=True,
+            )
+            predictions = result.pop("predictions")
+            final_metrics = result
+        prediction_file, report_file = _write_validation_artifacts(
+            predictions=predictions,
+            metrics=final_metrics,
+            validation_available=validation_available,
+            val_label_counts=val_label_counts,
+            val_participant_ids=val_participant_ids,
+            classes=classes,
+            args=args,
+            freeze_policy=freeze_policy,
+            run_name=run_name,
+            config_digest=config_digest,
+            manifest_hash=manifest_hash,
+            final_epoch=final_epoch,
+            training_config=training_config,
+            checkpoint_dir=checkpoint_dir,
+        )
+        print(f"Final-epoch validation predictions: {prediction_file}")
+        print(f"Validation report: {report_file}")
+
+    def write_history() -> None:
+        write_json(history_path, {
+            "run": run_name,
+            "fold_id": args.fold_id,
+            "training_config": training_config,
+            "loss": {
+                "name": args.loss,
+                "gamma": args.focal_gamma if args.loss == "focal" else None,
+                "alpha_mode": args.focal_alpha_mode if args.loss == "focal" else None,
+                "alpha": alpha,
+            },
+            "preprocessing": preprocessing_metadata,
+            "selection_policy": "fixed_epoch_budget_final_checkpoint_no_validation_based_epoch_selection",
+            "history": history,
+        })
+
+    if resume_checkpoint is not None and start_epoch > args.epochs:
+        write_history()
+        export_final_validation(int(resume_checkpoint["epoch"]))
+        print(f"Run already complete at epoch {start_epoch - 1}; no additional training was needed.")
+        return
+
+    if resume_checkpoint is None and not args.overwrite:
+        existing = [
+            path for path in (
+                best_path, last_path, history_path, prediction_path, report_path
+            ) if path.exists()
+        ]
         if existing:
             raise SystemExit(
-                "Outputs for this exact run already exist. Use --resume to continue/skip, "
-                "or --overwrite to deliberately start again: " + ", ".join(map(str, existing))
+                "Outputs for this exact run already exist. Use --resume to continue/export, "
+                "or --overwrite to deliberately restart: " + ", ".join(map(str, existing))
             )
-    else:
-        for path in (best_path, last_path, history_path):
+    elif args.overwrite:
+        for path in (best_path, last_path, history_path, prediction_path, report_path):
             if path.exists():
                 path.unlink()
 
@@ -267,15 +428,14 @@ def main() -> None:
     if validation_available:
         print(f"Validation={len(val_loader.dataset)} {val_label_counts}")
     else:
-        print("Validation unavailable for this fold; no validation score or best checkpoint will be produced.")
+        print("Validation unavailable for this fold; it will have no score or OOF predictions.")
     print(f"Trainable backbone parameters: {len(model.backbone_trainable_parameter_names)}")
     print(f"Run name: {run_name}")
+    print("Checkpoint policy: fixed epoch budget; no best-epoch selection on small validation sets.")
 
-    def checkpoint_payload(
-        *, epoch: int, val_stats: dict | None, checkpoint_kind: str, best_val_macro_f1: float | None
-    ) -> dict:
+    def checkpoint_payload(epoch: int, val_stats: dict | None) -> dict:
         return {
-            "checkpoint_kind": checkpoint_kind,
+            "checkpoint_kind": "last",
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "architecture": args.architecture,
@@ -301,12 +461,8 @@ def main() -> None:
             "fold_manifest_sha256": manifest_hash,
             "seed": args.seed,
             "epoch": epoch,
-            "best_val_macro_f1": best_val_macro_f1,
             "val_metrics": val_stats,
-            "selection_policy": (
-                "best_validation_macro_f1" if checkpoint_kind == "best"
-                else ("fixed_last_epoch_no_validation" if not validation_available else "last_training_epoch")
-            ),
+            "selection_policy": "fixed_epoch_budget_final_checkpoint",
             "validation_available": validation_available,
             "train_label_counts": train_label_counts,
             "validation_label_counts": val_label_counts,
@@ -337,57 +493,22 @@ def main() -> None:
             )
 
         history.append({"epoch": epoch, "train": train_stats, "val": val_stats})
-        improved = False
-        if val_stats is not None and val_stats["macro_f1"] > best_score:
-            best_score = float(val_stats["macro_f1"])
-            improved = True
-
+        val_log = " | val=unavailable"
+        if val_stats is not None:
+            val_log = (
+                f" | val_loss={val_stats['loss']:.4f}"
+                f" val_macroF1_all={val_stats['macro_f1_all_classes']:.3f}"
+                f" val_macroF1_present={val_stats['macro_f1_present_classes']}"
+            )
         print(
             f"Epoch {epoch:03d}/{args.epochs} | train_loss={train_stats['loss']:.4f} "
-            f"train_macroF1={train_stats['macro_f1']:.3f}"
-            + (
-                f" | val_loss={val_stats['loss']:.4f} val_macroF1={val_stats['macro_f1']:.3f}"
-                if val_stats is not None else " | val=unavailable"
-            )
+            f"train_macroF1_all={train_stats['macro_f1_all_classes']:.3f}{val_log}"
         )
+        _save_checkpoint(last_path, checkpoint_payload(epoch, val_stats))
 
-        best_value = best_score if math.isfinite(best_score) else None
-        _save_checkpoint(
-            last_path,
-            checkpoint_payload(
-                epoch=epoch,
-                val_stats=val_stats,
-                checkpoint_kind="last",
-                best_val_macro_f1=best_value,
-            ),
-        )
-        if improved:
-            _save_checkpoint(
-                best_path,
-                checkpoint_payload(
-                    epoch=epoch,
-                    val_stats=val_stats,
-                    checkpoint_kind="best",
-                    best_val_macro_f1=best_value,
-                ),
-            )
-
-    write_json(history_path, {
-        "run": run_name,
-        "fold_id": args.fold_id,
-        "training_config": training_config,
-        "loss": {
-            "name": args.loss,
-            "gamma": args.focal_gamma if args.loss == "focal" else None,
-            "alpha_mode": args.focal_alpha_mode if args.loss == "focal" else None,
-            "alpha": alpha,
-        },
-        "preprocessing": preprocessing_metadata,
-        "history": history,
-    })
-    print(f"Saved last checkpoint: {last_path}")
-    if validation_available and best_path.is_file():
-        print(f"Saved best checkpoint: {best_path}")
+    write_history()
+    export_final_validation(args.epochs)
+    print(f"Saved final checkpoint: {last_path}")
     print(f"Saved history: {history_path}")
     print("No held-out test rows were loaded or evaluated.")
 

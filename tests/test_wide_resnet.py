@@ -1,6 +1,15 @@
+import pytest
 import torch
 
-from model.wide_resnet import WideResNet50_2
+from model.wide_resnet import FREEZE_POLICIES, WideResNet50_2
+
+
+def test_only_thesis_and_frozen_feature_policies_are_available():
+    assert set(FREEZE_POLICIES) == {"early", "all"}
+    with pytest.raises(ValueError, match="freeze_policy"):
+        WideResNet50_2(pretrained=False, freeze_policy="none")
+    with pytest.raises(ValueError, match="freeze_policy"):
+        WideResNet50_2(pretrained=False, freeze_policy="final_block")
 
 
 def test_wide_resnet_exposes_2048d_features_and_three_class_logits():
@@ -33,7 +42,7 @@ def test_fully_frozen_backbone_keeps_batchnorm_statistics_and_trains_head():
     assert any(parameter.grad is not None for parameter in model.classifier.parameters())
 
 
-def test_thesis_style_early_policy_freezes_stem_and_trains_upper_residual_stages():
+def test_thesis_style_early_policy_freezes_early_stages_and_trains_upper_stages():
     model = WideResNet50_2(pretrained=False, freeze_policy="early")
     model.train()
 
@@ -56,13 +65,9 @@ def test_early_policy_backpropagates_only_through_upper_residual_stages():
     assert any(parameter.grad is not None for parameter in model.backbone[7].parameters())
 
 
-def test_final_block_policy_is_separate_fine_tuning_ablation():
-    model = WideResNet50_2(pretrained=False, freeze_policy="final_block")
-    assert all(not p.requires_grad for p in model.backbone[:7].parameters())
-    assert all(p.requires_grad for p in model.backbone[7].parameters())
-
-
-def test_legacy_freeze_backbone_flag_maps_to_freeze_policy():
+def test_legacy_freeze_flag_only_accepts_full_freezing():
     model = WideResNet50_2(pretrained=False, freeze_backbone=True)
     assert model.freeze_policy == "all"
     assert model.backbone_frozen
+    with pytest.raises(ValueError, match="Full unfreezing"):
+        WideResNet50_2(pretrained=False, freeze_backbone=False)

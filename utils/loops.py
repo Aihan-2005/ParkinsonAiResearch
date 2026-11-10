@@ -15,13 +15,17 @@ def run_epoch(
     class_names: tuple[str, ...],
     optimizer: torch.optim.Optimizer | None = None,
     criterion: nn.Module | None = None,
+    include_predictions: bool = False,
 ) -> dict:
+
+
     training = optimizer is not None
     model.train(training)
     criterion = criterion or nn.CrossEntropyLoss()
     total_loss = 0.0
     all_targets: list[int] = []
     all_predictions: list[int] = []
+    prediction_rows: list[dict] = []
 
     with torch.set_grad_enabled(training):
         for batch in loader:
@@ -29,17 +33,46 @@ def run_epoch(
             targets = batch["label"].to(device)
             if training:
                 optimizer.zero_grad(set_to_none=True)
+
             logits = model(images)
             loss = criterion(logits, targets)
             if training:
                 loss.backward()
                 optimizer.step()
+
+            predicted = logits.argmax(dim=1)
             total_loss += loss.item() * len(targets)
-            all_targets.extend(targets.detach().cpu().tolist())
-            all_predictions.extend(logits.argmax(dim=1).detach().cpu().tolist())
+            target_values = targets.detach().cpu().tolist()
+            predicted_values = predicted.detach().cpu().tolist()
+            all_targets.extend(target_values)
+            all_predictions.extend(predicted_values)
+
+            if include_predictions:
+                probabilities = torch.softmax(logits.detach(), dim=1).cpu().tolist()
+                drawing_ids = batch["drawing_id"]
+                participant_ids = batch["participant_id"]
+                image_names = batch["image_name"]
+                image_paths = batch["image_path"]
+                for index, (target, pred, probability) in enumerate(
+                    zip(target_values, predicted_values, probabilities)
+                ):
+                    prediction_rows.append({
+                        "drawing_id": str(drawing_ids[index]),
+                        "participant_id": str(participant_ids[index]),
+                        "image_name": str(image_names[index]),
+                        "image_path": str(image_paths[index]),
+                        "true_label": class_names[target],
+                        "predicted_label": class_names[pred],
+                        "probabilities": {
+                            name: float(probability[class_index])
+                            for class_index, name in enumerate(class_names)
+                        },
+                    })
 
     metrics = classification_metrics(all_targets, all_predictions, class_names)
     metrics["loss"] = total_loss / max(1, len(loader.dataset))
+    if include_predictions:
+        metrics["predictions"] = prediction_rows
     return metrics
 
 

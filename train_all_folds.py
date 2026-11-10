@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--focal-alpha-mode", choices=("uniform", "inverse_frequency"), default="uniform")
     parser.add_argument("--label-source", choices=("consensus", "real"), default="consensus")
     parser.add_argument("--pretrained", action=argparse.BooleanOptionalAction, default=MODEL.pretrained)
-    parser.add_argument("--freeze-policy", choices=("all", "early", "final_block", "none"), default=MODEL.freeze_policy)
+    parser.add_argument("--freeze-policy", choices=("early", "all"), default=MODEL.freeze_policy)
     parser.add_argument("--epochs", type=int, default=TRAIN.epochs)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--image-size", type=int, default=DATA.image_size)
@@ -39,8 +39,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--root", type=Path, default=ROOT_DIR)
     parser.add_argument("--checkpoint-dir", type=Path, default=TRAIN.checkpoint_dir)
     parser.add_argument("--continue-on-error", action="store_true")
-    parser.add_argument("--resume", action="store_true", help="Resume incomplete folds and skip folds already at the requested epoch budget.")
-    parser.add_argument("--overwrite", action="store_true", help="Delete existing outputs and restart every selected fold.")
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="Resume incomplete folds; completed folds export final-epoch validation predictions without retraining.",
+    )
+    parser.add_argument(
+        "--overwrite", action="store_true",
+        help="Delete existing outputs and restart every selected fold.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--summary-path", type=Path, default=None)
     return parser.parse_args()
@@ -59,22 +65,31 @@ def main() -> None:
     if not train_script.is_file():
         raise SystemExit(f"train.py not found beside this script: {train_script}")
 
+    manifest_hash = hashlib.sha256(args.manifest.read_bytes()).hexdigest()
     summary = {
         "started_at_utc": datetime.now(timezone.utc).isoformat(),
         "loss": args.loss,
         "fold_range": [args.fold_start, args.fold_end],
         "test_folds_loaded": False,
         "manifest_path": str(args.manifest),
-        "manifest_sha256": hashlib.sha256(args.manifest.read_bytes()).hexdigest(),
+        "manifest_sha256": manifest_hash,
+        "selection_policy": "fixed_epoch_budget_final_checkpoint_no_validation_based_epoch_selection",
         "training_config": {
-            "loss": args.loss, "focal_gamma": args.focal_gamma if args.loss == "focal" else None,
+            "loss": args.loss,
+            "focal_gamma": args.focal_gamma if args.loss == "focal" else None,
             "focal_alpha_mode": args.focal_alpha_mode if args.loss == "focal" else None,
-            "label_source": args.label_source, "pretrained": args.pretrained,
-            "freeze_policy": args.freeze_policy, "epochs": args.epochs,
-            "batch_size": args.batch_size, "image_size": args.image_size,
-            "num_workers": args.num_workers, "lr": args.lr,
-            "backbone_lr": args.backbone_lr, "weight_decay": args.weight_decay,
-            "seed": args.seed, "device": args.device,
+            "label_source": args.label_source,
+            "pretrained": args.pretrained,
+            "freeze_policy": args.freeze_policy,
+            "epochs": args.epochs,
+            "batch_size": args.batch_size,
+            "image_size": args.image_size,
+            "num_workers": args.num_workers,
+            "lr": args.lr,
+            "backbone_lr": args.backbone_lr,
+            "weight_decay": args.weight_decay,
+            "seed": args.seed,
+            "device": args.device,
         },
         "runs": [],
     }
@@ -108,7 +123,7 @@ def main() -> None:
     for fold_id in range(args.fold_start, args.fold_end + 1):
         command = [sys.executable, str(train_script), "--fold-id", str(fold_id), *common]
         print("\n" + "=" * 78)
-        print(f"TLO fold {fold_id:02d}/25 | loss={args.loss} | seed={args.seed}")
+        print(f"TLO fold {fold_id:02d}/25 | loss={args.loss} | freeze={args.freeze_policy} | seed={args.seed}")
         print("Command:", " ".join(command))
 
         if args.dry_run:
@@ -123,8 +138,7 @@ def main() -> None:
             "status": "dry_run" if args.dry_run else ("ok" if return_code == 0 else "failed"),
             "command": command,
             "validation_note": (
-                "Fold 22 has no eligible validation images in the confirmed current export; "
-                "training should save last.pt only and must not produce a validation score."
+                "Fold 22 has no eligible validation images; it must not receive a validation score or OOF predictions."
                 if fold_id == 22 else None
             ),
         }
@@ -138,8 +152,10 @@ def main() -> None:
 
     summary_path = args.summary_path or (
         Path(args.checkpoint_dir).parent / (
-            f"tlo_{args.loss}_{args.label_source}_{args.freeze_policy}_gamma{args.focal_gamma if args.loss == 'focal' else 'na'}_"
-            f"alpha{args.focal_alpha_mode if args.loss == 'focal' else 'na'}_img{args.image_size}_ep{args.epochs}_seed{args.seed}_"
+            f"tlo_{args.loss}_{args.label_source}_{args.freeze_policy}_"
+            f"gamma{args.focal_gamma if args.loss == 'focal' else 'na'}_"
+            f"alpha{args.focal_alpha_mode if args.loss == 'focal' else 'na'}_"
+            f"img{args.image_size}_ep{args.epochs}_seed{args.seed}_"
             f"folds_{args.fold_start:02d}-{args.fold_end:02d}.json"
         )
     )
