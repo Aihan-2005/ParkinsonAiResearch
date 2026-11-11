@@ -145,3 +145,16 @@ Hyperparameter searches, epoch selection and rejection-threshold tuning require
 inner participant-grouped splits if the outer CV result is to evaluate the full
 selection procedure. This implementation freezes the supplied settings; it does
 not silently tune them on outer held-out predictions or implement nested CV.
+
+## Verification
+
+The full suite passes **129 tests**. The end-to-end evaluation test trains 50
+independent small synthetic models across two seeds, exports real predictions,
+and runs the same aggregation and repeated-summary paths. It checks model resets,
+complete/incomplete/empty pairs, subject weighting and exclusion of a deliberately
+unavailable test image. Other checks reject changed recipes, partial coverage,
+missing seeds and altered prediction files.
+
+The real cleaned-data plan and its fresh development-only Colab export both
+confirm 103 images, 32 subjects and the 8/16/1 pair breakdown. No full research
+training or test-performance evaluation was launched during implementation.
