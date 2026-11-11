@@ -1,5 +1,10 @@
 # ParkinsonAiResearch
 
+B4 implementation: [64-D contrastive + KNN and RBF L1/L2](README/B4_METRIC_RBF.md).
+Run `train_b4.py` after a fold-specific baseline, then reload with `eval_b4.py`.
+
+Arya's B4 handoff: [ReadMEArya2 — implementation, verification and remaining work](README/ReadMEArya2.md).
+
 Current B1 input pipeline: [preprocessing and data loading](README/B1_PREPROCESSING.md).
 
 Arya's implementation handoff: [ReadMEArya1](README/ReadMEArya1.md), alongside the teammate's READMEs.

@@ -1,0 +1,64 @@
+"""Restricted learned-centre RBF variant from roadmap p16, not the original code."""
+from __future__ import annotations
+
+import math
+
+import torch
+from torch import nn
+
+from .embedding import EmbeddingProjection
+
+
+class DeepRBF(nn.Module):
+    def __init__(self, input_dim: int = 2048, embedding_dim: int = 64,
+                 distance: str = "l1", normalize: bool = False) -> None:
+        super().__init__()
+        if distance not in {"l1", "l2"}:
+            raise ValueError("distance must be l1 or l2")
+        self.projection = EmbeddingProjection(input_dim, embedding_dim, normalize)
+        self.centres = nn.Parameter(torch.zeros(2, embedding_dim))
+        self.distance = distance
+
+    def distances(self, embeddings: torch.Tensor) -> torch.Tensor:
+        delta = embeddings[:, None, :] - self.centres[None, :, :]
+        # L2 is the Euclidean norm, never squared L2. vector_norm has finite
+        # zero subgradients at identical points (no artificial epsilon radius).
+        return torch.linalg.vector_norm(delta, ord=1 if self.distance == "l1" else 2, dim=2)
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        return self.distances(self.projection(features))
+
+    @torch.no_grad()
+    def initialize_centres(self, features: torch.Tensor, targets: torch.Tensor) -> None:
+        z = self.projection(features)
+        for label in (0, 1):
+            mask = targets == label
+            if not mask.any():
+                raise ValueError("RBF training requires both known classes in the training fold")
+            self.centres[label].copy_(z[mask].mean(dim=0))
+
+
+def reject_distances(distances: torch.Tensor, *, distance_threshold: float,
+                     gap_threshold: float) -> tuple[torch.Tensor, list[str]]:
+    """Strict p17 boundaries, global gap rule; inference needs no clinical label."""
+    if any(not math.isfinite(x) or x < 0 for x in (distance_threshold, gap_threshold)):
+        raise ValueError("Rejection thresholds must be finite and nonnegative")
+    if distances.ndim != 2 or distances.shape[1] != 2:
+        raise ValueError("Expected distances [N,2]")
+    if not torch.isfinite(distances).all() or (distances < 0).any():
+        raise ValueError("Distances must be finite and nonnegative")
+    nearest, labels = distances.min(dim=1)
+    far = nearest > distance_threshold
+    gap = (distances[:, 0] - distances[:, 1]).abs()
+    ambiguous = gap < gap_threshold
+    # An exact tie cannot select a known class, even with a zero gap threshold.
+    tied = distances[:, 0] == distances[:, 1]
+    labels = labels.clone()
+    labels[far | ambiguous | tied] = 2
+    reasons = [
+        "far_from_known_classes" if bool(f) else
+        "equal_distance_tie" if bool(t) else
+        "ambiguous_distance_gap" if bool(a) else "accepted"
+        for f, a, t in zip(far.cpu(), ambiguous.cpu(), tied.cpu())
+    ]
+    return labels, reasons
