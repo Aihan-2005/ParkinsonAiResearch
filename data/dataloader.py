@@ -14,7 +14,7 @@ from typing import Callable
 import numpy as np
 from PIL import Image, ImageOps, __version__ as pillow_version
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 from config import CLASS_NAMES, DATA, ROOT_DIR, PreprocessingConfig
 from config.data_config import IMAGENET_MEAN, IMAGENET_STD
@@ -331,6 +331,7 @@ def make_loader(
     allow_empty: bool = False,
     verify_files: bool = True,
     seed: int = 42,
+    sampling: str = "shuffle",
 ) -> DataLoader:
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
@@ -338,6 +339,10 @@ def make_loader(
         raise ValueError("num_workers cannot be negative")
     if type(seed) is not int or not 0 <= seed < 2 ** 63:
         raise ValueError("seed must be an integer in [0, 2**63)")
+    if sampling not in {"shuffle", "class_balanced"}:
+        raise ValueError("sampling must be 'shuffle' or 'class_balanced'")
+    if sampling != "shuffle" and split != "train":
+        raise ValueError("Class-balanced replacement sampling is training-only")
 
     dataset = SpiralDataset(
         manifest_path=manifest_path,
@@ -350,13 +355,22 @@ def make_loader(
         allow_empty=allow_empty,
         verify_files=verify_files,
     )
+    generator = torch.Generator().manual_seed(seed)
+    sampler = None
+    if sampling == "class_balanced" and len(dataset):
+        counts = dataset.label_counts()
+        sampler = WeightedRandomSampler(
+            [1.0 / counts[row["_label_name"]] for row in dataset.rows],
+            num_samples=len(dataset), replacement=True, generator=generator,
+        )
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=(split == "train" and len(dataset) > 0),
+        shuffle=(sampler is None and split == "train" and len(dataset) > 0),
+        sampler=sampler,
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
-        generator=torch.Generator().manual_seed(seed),
+        generator=generator,
         worker_init_fn=_seed_worker,
         drop_last=False,
     )

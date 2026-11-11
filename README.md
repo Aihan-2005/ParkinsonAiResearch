@@ -1,5 +1,10 @@
 # ParkinsonAiResearch
 
+Repeated development evaluation: [pooled held-out predictions, missing-subject reporting and summaries across seeds](README/DEVELOPMENT_EVALUATION.md).
+
+WideResNet + CE / focal: [thesis comparison, implementation audit and run commands](README/WIDERESNET_BASELINES.md).
+The complete [baseline notebook](notebooks/01_wideresnet50_2.ipynb) calls the same training scripts.
+
 Metric learning and RBF implementation: [64-D contrastive + KNN and RBF L1/L2](README/METRIC_LEARNING_AND_RBF.md).
 Run `train_representation.py` after a fold-specific baseline, then reload with `eval_representation.py`.
 

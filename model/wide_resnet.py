@@ -36,7 +36,9 @@ class WideResNet50_2(nn.Module):
         if freeze_policy not in FREEZE_POLICIES:
             raise ValueError(f"freeze_policy must be one of {FREEZE_POLICIES}")
 
-        weights = models.Wide_ResNet50_2_Weights.DEFAULT if pretrained else None
+        # Pin the current DEFAULT recipe so a future torchvision update cannot
+        # silently change the pretrained initialization of these experiments.
+        weights = models.Wide_ResNet50_2_Weights.IMAGENET1K_V2 if pretrained else None
         torchvision_model = models.wide_resnet50_2(weights=weights)
         self.feature_dim = int(torchvision_model.fc.in_features)
         self.backbone = nn.Sequential(*list(torchvision_model.children())[:-1])

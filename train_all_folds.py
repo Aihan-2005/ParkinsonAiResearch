@@ -11,8 +11,9 @@ from pathlib import Path
 from config import DATA, MODEL, ROOT_DIR, TRAIN
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
+        allow_abbrev=False,
         description=(
             "Run independent training for TLO development folds 1..25. "
             "The locked test folds 26..34 are never passed to train.py."
@@ -23,6 +24,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--loss", choices=("cross_entropy", "focal"), default="cross_entropy")
     parser.add_argument("--focal-gamma", type=float, default=2.0)
     parser.add_argument("--focal-alpha-mode", choices=("uniform", "inverse_frequency"), default="uniform")
+    parser.add_argument("--augmentation", choices=("none", "standard"), default="none")
+    parser.add_argument("--rotation-degrees", type=float, default=10.0)
+    parser.add_argument("--hflip-prob", type=float, default=0.5)
+    parser.add_argument("--noise-std", type=float, default=0.01)
+    parser.add_argument("--sampling", choices=("shuffle", "class_balanced"), default="shuffle")
     parser.add_argument("--label-source", choices=("consensus", "real"), default="consensus")
     parser.add_argument("--pretrained", action=argparse.BooleanOptionalAction, default=MODEL.pretrained)
     parser.add_argument("--freeze-policy", choices=("early", "all"), default=MODEL.freeze_policy)
@@ -49,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--summary-path", type=Path, default=None)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def main() -> None:
@@ -90,6 +96,11 @@ def main() -> None:
             "weight_decay": args.weight_decay,
             "seed": args.seed,
             "device": args.device,
+            "augmentation": args.augmentation,
+            "rotation_degrees": args.rotation_degrees,
+            "horizontal_flip_probability": args.hflip_prob,
+            "noise_std": args.noise_std,
+            "sampling": args.sampling,
         },
         "runs": [],
     }
@@ -100,6 +111,11 @@ def main() -> None:
         "--loss", args.loss,
         "--focal-gamma", str(args.focal_gamma),
         "--focal-alpha-mode", args.focal_alpha_mode,
+        "--augmentation", args.augmentation,
+        "--rotation-degrees", str(args.rotation_degrees),
+        "--hflip-prob", str(args.hflip_prob),
+        "--noise-std", str(args.noise_std),
+        "--sampling", args.sampling,
         "--freeze-policy", args.freeze_policy,
         "--epochs", str(args.epochs),
         "--batch-size", str(args.batch_size),
@@ -149,6 +165,9 @@ def main() -> None:
     summary["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
     summary["failed_folds"] = [r["fold_id"] for r in summary["runs"] if r["status"] == "failed"]
     summary["completed_folds"] = [r["fold_id"] for r in summary["runs"] if r["status"] == "ok"]
+    config_digest = hashlib.sha256(
+        json.dumps(summary["training_config"], sort_keys=True).encode("utf-8")
+    ).hexdigest()[:8]
 
     summary_path = args.summary_path or (
         Path(args.checkpoint_dir).parent / (
@@ -156,7 +175,7 @@ def main() -> None:
             f"gamma{args.focal_gamma if args.loss == 'focal' else 'na'}_"
             f"alpha{args.focal_alpha_mode if args.loss == 'focal' else 'na'}_"
             f"img{args.image_size}_ep{args.epochs}_seed{args.seed}_"
-            f"folds_{args.fold_start:02d}-{args.fold_end:02d}.json"
+            f"folds_{args.fold_start:02d}-{args.fold_end:02d}_cfg{config_digest}.json"
         )
     )
     summary_path.parent.mkdir(parents=True, exist_ok=True)

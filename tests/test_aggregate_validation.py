@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import aggregate_validation
+import pytest
 
 
 def write_csv(path: Path, rows):
@@ -138,3 +139,18 @@ def test_aggregator_checks_and_pools_one_oof_prediction_per_development_drawing(
     assert summary["missing_oof_images"] == 0
     assert summary["pooled_oof_metrics"]["accuracy"] == 1.0
     assert summary["test_partition_loaded_or_evaluated"] is False
+
+
+def test_aggregator_rejects_a_checkpoint_beyond_the_claimed_epoch_budget(tmp_path):
+    report = {
+        "manifest_sha256": "manifest", "label_source": "consensus",
+        "loss": "cross_entropy", "freeze_policy": "early", "seed": 42,
+        "focal_alpha_mode": None, "training_config": {},
+        "epochs_requested": 15, "final_epoch": 30,
+    }
+    (tmp_path / "run_validation_report.json").write_text(json.dumps(report))
+    with pytest.raises(SystemExit, match="actual checkpoint epoch"):
+        aggregate_validation._load_reports(
+            tmp_path, manifest_hash="manifest", label_source="consensus",
+            loss="cross_entropy", freeze_policy="early", seed=42, focal_alpha_mode="uniform",
+        )

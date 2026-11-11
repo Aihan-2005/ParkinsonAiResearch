@@ -1,23 +1,33 @@
 
 from __future__ import annotations
 
+import math
 
 def classification_metrics(
     targets: list[int],
     predictions: list[int],
     class_names: tuple[str, ...],
+    sample_weights: list[float] | None = None,
 ) -> dict:
     if len(targets) != len(predictions):
         raise ValueError("Targets and predictions must be the same length")
     if not class_names:
         raise ValueError("class_names must not be empty")
+    if sample_weights is not None:
+        if len(sample_weights) != len(targets):
+            raise ValueError("Sample weights and targets must have the same length")
+        if any(not math.isfinite(weight) or weight < 0 for weight in sample_weights):
+            raise ValueError("Sample weights must be finite and nonnegative")
+        if targets and sum(sample_weights) <= 0:
+            raise ValueError("Nonempty inputs must have positive total sample weight")
 
     count = len(class_names)
     confusion = [[0 for _ in range(count)] for _ in range(count)]
-    for target, pred in zip(targets, predictions):
+    weights = sample_weights if sample_weights is not None else [1] * len(targets)
+    for target, pred, weight in zip(targets, predictions, weights):
         if not 0 <= target < count or not 0 <= pred < count:
             raise ValueError(f"Invalid target={target} or prediction={pred}")
-        confusion[target][pred] += 1
+        confusion[target][pred] += weight
 
     def safe_div(num: int | float, den: int | float) -> float:
         return float(num / den) if den else 0.0
@@ -45,10 +55,10 @@ def classification_metrics(
         sum(per_class[name]["f1"] for name in present_classes) / len(present_classes)
         if present_classes else None
     )
-    total = len(targets)
+    total = sum(weights)
 
-    return {
-        "samples": total,
+    result = {
+        "samples": len(targets),
         "accuracy": safe_div(sum(confusion[i][i] for i in range(count)), total),
 
         "macro_f1": macro_all,
@@ -62,3 +72,6 @@ def classification_metrics(
         "confusion_matrix": confusion,
         "confusion_labels": list(class_names),
     }
+    if sample_weights is not None:
+        result["total_sample_weight"] = total
+    return result

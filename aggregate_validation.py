@@ -10,6 +10,7 @@ from pathlib import Path
 
 from config import CLASS_NAMES, DATA, ROOT_DIR, TRAIN
 from utils.metrics import classification_metrics
+from utils.validation_evaluation import roster_sha256, score_predictions
 from validation_audit import build_validation_audit, expected_validation_roster, read_csv
 
 
@@ -60,6 +61,8 @@ def _load_reports(
     for _, report in matches:
         config = dict(report.get("training_config") or {})
         config.pop("alpha", None)
+        if int(report.get("final_epoch", -1)) != int(report.get("epochs_requested", -2)):
+            raise SystemExit("A validation report's actual checkpoint epoch differs from its requested budget.")
         base_configs.append(json.dumps(config, sort_keys=True, separators=(",", ":")))
         epochs.add(int(report.get("epochs_requested", -1)))
     if len(set(base_configs)) != 1:
@@ -99,7 +102,8 @@ def main() -> None:
     parser.add_argument("--freeze-policy", choices=("early", "all"), default="early")
     parser.add_argument("--seed", type=int, default=TRAIN.seed)
     parser.add_argument("--output-dir", type=Path, default=ROOT_DIR / "outputs" / "validation_reports")
-    parser.add_argument("--require-complete", action="store_true")
+    parser.add_argument("--require-complete", action="store_true",
+                        help="Require all 25 reports and every available OOF image; this does not require complete subject pairs.")
     args = parser.parse_args()
 
     if not args.manifest.is_file():
@@ -112,7 +116,7 @@ def main() -> None:
     class_names = CLASS_NAMES if args.label_source == "consensus" else CLASS_NAMES[:2]
     manifest_hash = hashlib.sha256(args.manifest.read_bytes()).hexdigest()
 
-    expected = expected_validation_roster(manifest_rows, args.label_source)
+    expected = expected_validation_roster(manifest_rows, args.label_source, assignments_rows)
     expected_by_fold = Counter(item["fold_id"] for item in expected.values())
     reports_by_fold = _load_reports(
         args.predictions_dir,
@@ -127,6 +131,8 @@ def main() -> None:
     actual_by_drawing = {}
     prediction_rows = []
     for fold_id, (report_path, report) in sorted(reports_by_fold.items()):
+        if report.get("training_config", {}).get("seed", args.seed) != args.seed:
+            raise ValueError(f"Training configuration seed mismatch in {report_path}")
         prediction_path = args.predictions_dir / report["prediction_file"]
         if not prediction_path.is_file():
             raise FileNotFoundError(f"Prediction CSV referenced by {report_path} is missing: {prediction_path}")
@@ -180,6 +186,7 @@ def main() -> None:
         classification_metrics(targets, predictions, class_names)
         if prediction_rows else None
     )
+    scores = score_predictions(prediction_rows, class_names)
 
     audit_rows = build_validation_audit(manifest_rows, assignments_rows, args.label_source)
     audit_by_fold = {int(row["development_model_fold"]): row for row in audit_rows}
@@ -197,6 +204,10 @@ def main() -> None:
             "fold_id": fold_id,
             "report_found": fold_id in reports_by_fold,
             "validation_quality": audit["validation_quality"],
+            "pair_status": audit["pair_status"],
+            "validation_participants_assigned": audit["validation_participants_assigned"],
+            "validation_participants_with_eligible_images": audit["validation_participants_with_eligible_images"],
+            "participants_without_eligible_images": audit["participants_without_eligible_images"],
             "expected_validation_images": expected_by_fold.get(fold_id, 0),
             "predicted_validation_images": len(fold_rows),
             "accuracy": fold_metrics["accuracy"] if fold_metrics else "",
@@ -229,15 +240,51 @@ def main() -> None:
     per_fold_fields = list(per_fold_rows[0])
     _write_csv(args.output_dir / "oof_validation_per_fold.csv", per_fold_rows, per_fold_fields)
 
+    per_subject_rows = []
+    for participant in sorted({row["participant_id"] for row in prediction_rows}):
+        subject_rows = [row for row in prediction_rows if row["participant_id"] == participant]
+        subject_scores = score_predictions(subject_rows, class_names)["image_weighted"]
+        per_subject_rows.append({
+            "participant_id": participant,
+            "fold_id": subject_rows[0]["fold_id"],
+            "images": len(subject_rows),
+            "accuracy_on_subject_images": subject_scores["accuracy"],
+            **{f"support_{name}": subject_scores["per_class"][name]["support"] for name in class_names},
+        })
+    _write_csv(args.output_dir / "oof_validation_per_subject.csv", per_subject_rows,
+               ["participant_id", "fold_id", "images", "accuracy_on_subject_images",
+                *[f"support_{name}" for name in class_names]])
+
+    expected_rows = [{"drawing_id": drawing_id, **item} for drawing_id, item in expected.items()]
+    assigned_ids = {row["participant_id"] for row in assignments_rows
+                    if row.get("workbook_partition") == "development"}
+    available_ids = {row["participant_id"] for row in expected_rows}
+    complete_pair_folds = {row["development_model_fold"] for row in audit_rows
+                           if row["pair_status"] == "complete_pair"}
+
     summary = {
         "status": "complete" if complete else "incomplete",
-        "protocol": "Leave-Two-Out development validation, folds 1..25",
+        "schema_version": 2,
+        "protocol": "Available-data evaluation of prescribed two-subject holdouts, folds 1..25",
+        "prediction_coverage_complete": complete,
+        "completion_definition": "All 25 reports and every eligible held-out image; not a guarantee of complete subject pairs.",
+        "all_subject_pairs_complete": all(row["pair_status"] == "complete_pair" for row in audit_rows),
+        "pair_status_counts": dict(Counter(row["pair_status"] for row in audit_rows)),
         "label_source": args.label_source,
         "loss": args.loss,
         "focal_alpha_mode": args.focal_alpha_mode if args.loss == "focal" else None,
         "freeze_policy": args.freeze_policy,
         "seed": args.seed,
         "manifest_sha256": manifest_hash,
+        "assignments_sha256": hashlib.sha256(args.assignments.read_bytes()).hexdigest() if assignments_rows else None,
+        "classes": list(class_names),
+        "oof_roster_sha256": roster_sha256(expected_rows),
+        "predicted_roster_sha256": roster_sha256(prediction_rows),
+        "oof_predictions_sha256": hashlib.sha256((args.output_dir / "oof_validation_predictions.csv").read_bytes()).hexdigest(),
+        "assigned_development_subjects": len(assigned_ids) if assignments_rows else None,
+        "expected_oof_subjects": len(available_ids),
+        "predicted_oof_subjects": len({row["participant_id"] for row in prediction_rows}),
+        "participants_without_eligible_images": sorted(assigned_ids - available_ids),
         "reports_found": len(reports_by_fold),
         "missing_folds": missing_folds,
         "expected_oof_images": len(expected),
@@ -250,11 +297,28 @@ def main() -> None:
         ],
         "validation_quality_counts": dict(Counter(row["validation_quality"] for row in audit_rows)),
         "pooled_oof_metrics": pooled_metrics,
+        "subject_balanced_oof_metrics": scores["subject_balanced"],
+        "complete_pairs_only_metrics": score_predictions(
+            [row for row in prediction_rows if int(row["fold_id"]) in complete_pair_folds], class_names),
+        "metric_notes": {
+            "pooled_oof_metrics": "Each image contributes equally; these are pooled held-out predictions, not an average of fold F1 scores.",
+            "subject_balanced_oof_metrics": "Each subject contributes total weight 1 across their images; not a patient-level clinical diagnosis metric.",
+            "complete_pairs_only_metrics": "Secondary analysis of the complete-pair subset; this may represent a different cohort.",
+            "uncertainty": "Repeated images and overlapping CV runs are not independent subjects. Per-fold metrics are descriptive.",
+        },
+        "selection_policy": "fixed_epoch_budget_final_checkpoint",
+        "ensemble_weights_derived": False,
+        "training_config": {
+            key: value for key, value in next(iter(reports_by_fold.values()))[1].get("training_config", {}).items()
+            if key != "alpha"
+        },
+        "epochs": next(iter(reports_by_fold.values()))[1]["epochs_requested"],
         "test_partition_loaded_or_evaluated": False,
         "outputs": {
             "fold_audit": "validation_fold_audit.csv",
             "oof_predictions": "oof_validation_predictions.csv",
             "per_fold_metrics": "oof_validation_per_fold.csv",
+            "per_subject_metrics": "oof_validation_per_subject.csv",
         },
     }
     summary_path = args.output_dir / "oof_validation_summary.json"

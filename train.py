@@ -12,6 +12,7 @@ import torch
 
 from config import DATA, MODEL, ROOT_DIR, TRAIN, PreprocessingConfig
 from data.dataloader import build_eval_transform, build_train_transform, make_loader
+from data.augmentation import AugmentedSpiralTransform, TrainingAugmentation
 from model import build_model
 from utils.io import sha256_file, write_json
 from utils.loops import run_epoch, select_device
@@ -56,6 +57,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--loss", choices=("cross_entropy", "focal"), default="cross_entropy")
     parser.add_argument("--focal-gamma", type=float, default=2.0)
     parser.add_argument("--focal-alpha-mode", choices=("uniform", "inverse_frequency"), default="uniform")
+    parser.add_argument("--augmentation", choices=("none", "standard"), default="none",
+                        help="standard: rotation, horizontal flip and Gaussian noise; strengths are project choices.")
+    parser.add_argument("--rotation-degrees", type=float, default=10.0)
+    parser.add_argument("--hflip-prob", type=float, default=0.5)
+    parser.add_argument("--noise-std", type=float, default=0.01)
+    parser.add_argument("--sampling", choices=("shuffle", "class_balanced"), default="shuffle")
     parser.add_argument("--epochs", type=int, default=TRAIN.epochs)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--image-size", type=int, default=DATA.image_size)
@@ -221,7 +228,11 @@ def main() -> None:
 
     seed_everything(args.seed)
     preprocessing_config = PreprocessingConfig(image_size=args.image_size)
-    train_transform = build_train_transform(preprocessing_config)
+    augmentation = None
+    if args.augmentation == "standard":
+        augmentation = TrainingAugmentation(args.rotation_degrees, args.hflip_prob, args.noise_std)
+    train_transform = (AugmentedSpiralTransform(preprocessing_config, augmentation)
+                       if augmentation else build_train_transform(preprocessing_config))
     eval_transform = build_eval_transform(preprocessing_config)
     preprocessing_metadata = train_transform.metadata()
     device = select_device(args.device)
@@ -236,7 +247,7 @@ def main() -> None:
         num_workers=args.num_workers,
         seed=args.seed,
     )
-    train_loader = make_loader(split="train", transform=train_transform, **loader_kwargs)
+    train_loader = make_loader(split="train", transform=train_transform, sampling=args.sampling, **loader_kwargs)
     val_loader = make_loader(split="val", transform=eval_transform, allow_empty=True, **loader_kwargs)
     if len(train_loader.dataset) == 0:
         raise SystemExit(f"Fold {args.fold_id} has no eligible training images")
@@ -276,6 +287,12 @@ def main() -> None:
         "weight_decay": args.weight_decay,
         "seed": args.seed,
     }
+    # Preserve existing deterministic-run identities and old resumable checkpoints.
+    # Any new training behavior is included in the run digest and checkpoint.
+    if augmentation is not None:
+        training_config["training_augmentation"] = augmentation.to_dict()
+    if args.sampling != "shuffle":
+        training_config["sampling"] = args.sampling
     manifest_hash = sha256_file(args.manifest)
     config_digest = hashlib.sha256(
         json.dumps(training_config, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -313,6 +330,8 @@ def main() -> None:
             raise SystemExit("Resume configuration differs from the saved training configuration")
         if resume_checkpoint.get("preprocessing") != preprocessing_metadata:
             raise SystemExit("Resume preprocessing metadata differs from the checkpoint")
+        if int(resume_checkpoint["epoch"]) > args.epochs:
+            raise SystemExit("Resume checkpoint exceeds --epochs; use its actual epoch budget or start a separate run.")
 
     model = build_model(
         architecture=args.architecture,
@@ -424,6 +443,7 @@ def main() -> None:
         f"freeze_policy={freeze_policy} | pretrained={args.pretrained}"
     )
     print(f"Label source={args.label_source} | classes={classes} | loss={args.loss}")
+    print(f"Training augmentation={args.augmentation} | sampling={args.sampling}")
     print(f"Train={len(train_loader.dataset)} {train_label_counts}")
     if validation_available:
         print(f"Validation={len(val_loader.dataset)} {val_label_counts}")
@@ -440,7 +460,7 @@ def main() -> None:
             "optimizer_state_dict": optimizer.state_dict(),
             "architecture": args.architecture,
             "pretrained_backbone": args.pretrained,
-            "pretrained_weights": "Wide_ResNet50_2_Weights.DEFAULT" if args.pretrained else None,
+            "pretrained_weights": "Wide_ResNet50_2_Weights.IMAGENET1K_V2" if args.pretrained else None,
             "freeze_policy": freeze_policy,
             "backbone_frozen": model.backbone_frozen,
             "trainable_parameter_names": model.trainable_parameter_names,
