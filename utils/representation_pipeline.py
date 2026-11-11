@@ -1,4 +1,4 @@
-"""Shared B4 provenance checks, frozen feature extraction and inference.
+"""Shared Representation provenance checks, frozen feature extraction and inference.
 
 Feature caches are local to one invocation and one baseline/fold. No transform,
 backbone, KNN bank or RBF centre is fitted on validation/test images.
@@ -17,16 +17,20 @@ from torch.utils.data import DataLoader
 from config import CLASS_NAMES, PreprocessingConfig
 from data.dataloader import SpiralDataset, build_eval_transform
 from model import build_model
-from model.deep_rbf import DeepRBF, reject_distances
+from model.rbf import CentreRBF, reject_distances
 from model.embedding import EmbeddingProjection
 from utils.io import sha256_file, write_json
 from utils.metric_learning import knn_predict
 from utils.metrics import classification_metrics
 
+# Legacy wire identifier is deliberately stable: renaming source files must
+# not invalidate existing state_dict checkpoints or their configuration hashes.
 FORMAT_VERSION = "b4-frozen-features-v1"
 FIDELITY_NOTE = (
     "Proposed roadmap implementation: frozen fold-specific WideResNet; linear projection; "
     "all-pair balanced contrastive loss or restricted learned-centre RBF margin loss. "
+    "The RBF head is CentreRBF, not the paper's class-specific affine/powered-norm head. "
+    "Triplet, OSM, GMML, automatic selection and research-cohort validation are not included. "
     "Original thesis mining, modified RBF loss and stage schedule were not supplied."
 )
 
@@ -44,9 +48,9 @@ def load_baseline(path: Path, manifest: Path, device: torch.device,
     path, manifest = Path(path), Path(manifest)
     checkpoint = torch.load(path, map_location="cpu", weights_only=True)
     if checkpoint.get("architecture") != "wide_resnet50_2":
-        raise ValueError("B4 requires a fold-specific WideResNet50-2 baseline checkpoint")
+        raise ValueError("Representation requires a fold-specific WideResNet50-2 baseline checkpoint")
     if checkpoint.get("label_source") != "consensus" or checkpoint.get("class_names") != list(CLASS_NAMES):
-        raise ValueError("B4 requires the three-class expert-label baseline, including Unknown")
+        raise ValueError("Representation requires the three-class expert-label baseline, including Unknown")
     if checkpoint.get("num_classes") != 3 or checkpoint.get("feature_dim") != 2048:
         raise ValueError("Baseline must expose 2048-D pooled features and three classes")
     saved_fold = checkpoint.get("fold_id")
@@ -123,8 +127,8 @@ def build_stage(config: dict) -> torch.nn.Module:
     if config["branch"] == "metric":
         return EmbeddingProjection(**kwargs)
     if config["branch"] == "rbf":
-        return DeepRBF(distance=config["distance"], **kwargs)
-    raise ValueError("Unknown B4 branch")
+        return CentreRBF(distance=config["distance"], **kwargs)
+    raise ValueError("Unknown Representation branch")
 
 
 def config_digest(config: dict, source: dict) -> str:
@@ -145,20 +149,20 @@ def load_stage(path: Path, manifest: Path, device: torch.device,
                ) -> tuple[torch.nn.Module, torch.nn.Module, dict]:
     checkpoint = torch.load(path, map_location="cpu", weights_only=True)
     if checkpoint.get("format_version") != FORMAT_VERSION:
-        raise ValueError("Unsupported B4 checkpoint format")
+        raise ValueError("Unsupported Representation checkpoint format")
     if checkpoint.get("class_names") != list(CLASS_NAMES):
-        raise ValueError("B4 checkpoint class mapping differs")
+        raise ValueError("Representation checkpoint class mapping differs")
     source = checkpoint["source_baseline"]
     if sha256_file(manifest) != source["fold_manifest_sha256"]:
-        raise ValueError("B4 checkpoint/manifest hash mismatch")
+        raise ValueError("Representation checkpoint/manifest hash mismatch")
     baseline_path = Path(baseline_path or source["path"])
     if sha256_file(baseline_path) != source["sha256"]:
         raise ValueError("Source baseline checkpoint hash mismatch")
     backbone, restored_source = load_baseline(baseline_path, manifest, device, fold_id=source["fold_id"])
     if restored_source["preprocessing"] != source["preprocessing"]:
-        raise ValueError("B4/source baseline preprocessing mismatch")
+        raise ValueError("Representation/source baseline preprocessing mismatch")
     if checkpoint.get("config_digest") != config_digest(checkpoint["config"], source):
-        raise ValueError("B4 configuration digest mismatch")
+        raise ValueError("Representation configuration digest mismatch")
     # Verify bank membership from the exact manifest, not merely saved claims.
     # This check opens no images, including validation/test images.
     training = SpiralDataset(
@@ -169,7 +173,7 @@ def load_stage(path: Path, manifest: Path, device: torch.device,
     ids = [row["drawing_id"] for row in training.rows]
     participants = [row["participant_id"] for row in training.rows]
     if checkpoint.get("training_drawing_ids") != ids or checkpoint.get("training_participant_ids") != sorted(set(participants)):
-        raise ValueError("B4 training membership differs from this fold's manifest")
+        raise ValueError("Representation training membership differs from this fold's manifest")
     if checkpoint["config"]["branch"] == "metric":
         bank = checkpoint["training_bank"]
         expected_targets = torch.tensor([CLASS_NAMES.index(row["expert_label"]) for row in training.rows])
@@ -193,7 +197,7 @@ def predict_stage(model: torch.nn.Module, data: FeatureSet, checkpoint: dict,
         return []
     training_participants = set(checkpoint["training_participant_ids"])
     if any(row["participant_id"] in training_participants for row in data.rows):
-        raise ValueError("Evaluation participant overlaps the B4 training bank")
+        raise ValueError("Evaluation participant overlaps the Representation training bank")
     config = checkpoint["config"]
     model.eval()
     x = data.features.to(device)
@@ -239,7 +243,7 @@ def prediction_metrics(rows: list[dict]) -> dict | None:
         "accepted_accuracy": sum(true[i] == pred[i] for i in accepted) / len(accepted) if accepted else None,
         "pd_recall_all_cases": sum(t == p == 1 for t, p in zip(true, pred)) / n_pd if n_pd else None,
     })
-    # Preserve explicit undefined denominators in B4 reports rather than
+    # Preserve explicit undefined denominators in Representation reports rather than
     # representing absent predictions/classes as perfect or zero performance.
     for value in result["per_class"].values():
         if value["predicted"] == 0:

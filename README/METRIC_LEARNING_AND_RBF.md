@@ -1,4 +1,9 @@
-# B4: metric learning and RBF
+# Metric learning and learned-centre RBF
+
+**Implementation scope:** the contrastive + KNN comparator is implemented; the
+RBF branch is a restricted learned-centre prototype. Neither is a completed
+thesis reproduction. See [IMPLEMENTATION_AUDIT.md](IMPLEMENTATION_AUDIT.md) for
+the source comparison, remaining methods and verification limits.
 
 For the implementation inventory and verified handoff status, see
 [ReadMEArya2](ReadMEArya2.md).
@@ -19,7 +24,7 @@ projection/mining, modified RBF loss and stage schedule were not supplied.
 
 ## Prerequisite and environment
 
-Use the existing project environment (`requirements-b1-lock.txt`); B4 adds no
+Use the existing project environment (`requirements-lock.txt`); B4 adds no
 dependencies. Run commands from the repository root with that environment active.
 
 You need a **real fold-specific three-class baseline checkpoint** from `train.py`,
@@ -46,11 +51,11 @@ Replace the example baseline path with your actual fold-1 checkpoint:
 
 ```bash
 BASELINE="/absolute/path/to/fold01_focal_last.pt"
-python train_b4.py --branch metric --fold-id 1 \
+python train_representation.py --branch metric --fold-id 1 \
   --baseline-checkpoint "$BASELINE" \
   --epochs 30 --embedding-dim 64 --margin 1.0 \
   --knn-k 3 --distance l2 --knn-weighting uniform \
-  --output-dir outputs/b4/metric_fold01
+  --output-dir outputs/representations/metric_fold01
 ```
 
 - Expert classes remain `control=0`, `parkinson=1`, `unknown=2`.
@@ -77,12 +82,12 @@ python train_b4.py --branch metric --fold-id 1 \
 ## RBF L1 / L2
 
 ```bash
-python train_b4.py --branch rbf --fold-id 1 \
+python train_representation.py --branch rbf --fold-id 1 \
   --baseline-checkpoint "$BASELINE" \
   --distance l1 --epochs 30 --embedding-dim 64 \
   --known-margin 1.0 --reject-margin 1.0 --beta 1.0 \
   --distance-threshold 1.0 --gap-threshold 0.1 \
-  --output-dir outputs/b4/rbf_l1_fold01
+  --output-dir outputs/representations/rbf_l1_fold01
 ```
 
 Those values are **illustrative development settings**, not recovered thesis
@@ -137,8 +142,8 @@ model, history and Torch RNG state are restored. A nonempty output directory
 cannot be overwritten by a fresh run.
 
 ```bash
-python eval_b4.py --checkpoint outputs/b4/metric_fold01/last.pt \
-  --split val --output-dir outputs/b4/metric_fold01/reloaded_val
+python eval_representation.py --checkpoint outputs/representations/metric_fold01/last.pt \
+  --split val --output-dir outputs/representations/metric_fold01/reloaded_val
 ```
 
 For an RBF run, supply its own `last.pt`. Evaluation restores the exact stage and
@@ -146,7 +151,7 @@ baseline, preprocessing and KNN bank. If the baseline file moved, use
 `--baseline-checkpoint /new/path/to/the/same/file.pt`; its SHA-256 must match.
 Use `--manifest` and `--root` consistently for nondefault data locations.
 
-Training never requests test features. `eval_b4.py --split test` requires
+Training never requests test features. `eval_representation.py --split test` requires
 `--confirm-heldout-test`; use this only after the final protocol is frozen.
 There is no mismatch bypass and no inference-time threshold override. Fold 22
 can train but exports empty validation predictions and null metrics, not a score.
@@ -169,7 +174,7 @@ reported. Rejected true-PD cases stay in the all-case recall denominator.
 Evaluation writes analogous files in the selected output directory. Vote
 fractions are not calibrated probabilities. B4 files are separate from the
 baseline OOF aggregator's schema and are not silently mixed into its reports.
-Keep the source baseline checkpoint alongside B4 checkpoints: stage files are
+Keep the source baseline checkpoint alongside representation checkpoints: stage files are
 small and reference, rather than duplicate, its weights.
 
 Epoch selection uses the fixed final budget. Learning rates, margins, thresholds,
@@ -181,7 +186,7 @@ remain A4/B3 work. Triplet, OSM and GMML remain later comparisons.
 ## Verification and review
 
 ```bash
-python -m pytest -q tests/test_b4_models.py tests/test_b4_pipeline.py
+python -m pytest -q tests/test_representation_models.py tests/test_representation_pipeline.py
 ```
 
 Checks cover loss equations and gradient directions, missing groups, exact
@@ -195,3 +200,16 @@ scientific validation. No held-out research test performance is claimed.
 
 Implementation review: automated checks plus a local source review. Team/professor
 review of the proposed loss, training stage and development settings is pending.
+
+## Descriptive filenames and checkpoint compatibility
+
+Commands are now `train_representation.py` and `eval_representation.py`; shared
+code is `utils/representation_pipeline.py`; the head is `model/rbf.py` and its
+class is `CentreRBF`. The environment lock is `requirements-lock.txt`.
+Task labels such as B4 remain roadmap references, not executable filenames.
+
+The checkpoint's original internal format identifier and parameter names remain
+stable, so existing saved stage state dictionaries remain readable. Older
+output directories are not moved. To resume an older run, use the new command
+name with its original `--output-dir` and unchanged options. Old command module
+names are removed; update notebooks/scripts to import the descriptive modules.

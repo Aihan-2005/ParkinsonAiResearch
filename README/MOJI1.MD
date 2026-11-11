@@ -2,7 +2,7 @@
 
 > **Historical version:** This document describes the superseded random-split pipeline.
 > See [MOJI2.md](MOJI2.md) for the workbook-fold handoff and
-> [B1_PREPROCESSING.md](B1_PREPROCESSING.md) for current preprocessing and data loading.
+> [ReadMEArya1.md](ReadMEArya1.md) for current preprocessing and data loading.
 
 > **هدف این فایل:** توضیح دقیق وضعیت فعلی پروژه، کارهایی که تا این مرحله انجام شده، ساختار کد و داده، و شرح وظایف فاز بعدی یعنی **Image Data Preprocessing**.  
 > لطفاً قبل از تغییر کدها این README را کامل بخوانید.

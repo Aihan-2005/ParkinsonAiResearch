@@ -1,12 +1,18 @@
-# ReadMEArya2 — B4 Metric Learning and RBF Handoff
+# ReadMEArya2 — Metric Learning and RBF Handoff
 
 **Documentation date:** 2026-11-11
 
 **Scope:** The core implementation of task **B4** on page 21 of the implementation roadmap: a separate embedding stage, a contrastive/KNN branch, and an RBF branch with loss and rejection checks. Method specifications are on roadmap pages 15–17.
 
-**Status:** Code implemented and checked with **24 B4 tests**. Training on the actual research cohort, development selection and final scientific validation remain pending. This handoff does not claim reproduced thesis performance.
+**Status:** The original handoff passed 24 representation tests. The current audit passes **34 representation tests and 102 full-suite tests**. Training on the actual research cohort, development selection and final scientific validation remain pending. This handoff does not claim reproduced thesis performance.
 
-This is the second Arya implementation handoff, following [ReadMEArya1](ReadMEArya1.md). The detailed B4 usage guide is [B4_METRIC_RBF.md](B4_METRIC_RBF.md). The teammate's data/fold handoff remains [MOJI2.md](MOJI2.md).
+**Audit clarification:** this covers contrastive + KNN and a restricted `CentreRBF`
+comparator. It does not implement the paper's full affine Deep-RBF, Triplet, OSM,
+GMML or automatic development selection. The original 24-test result below is
+the initial handoff record; current audit results and renamed entry points are
+documented in [IMPLEMENTATION_AUDIT.md](IMPLEMENTATION_AUDIT.md).
+
+This is the second Arya implementation handoff, following [ReadMEArya1](ReadMEArya1.md). The detailed B4 usage guide is [METRIC_LEARNING_AND_RBF.md](METRIC_LEARNING_AND_RBF.md). The teammate's data/fold handoff remains [MOJI2.md](MOJI2.md).
 
 ## 1. Exactly what was implemented
 
@@ -48,17 +54,17 @@ Paths in this table are relative to the repository root.
 | --- | --- |
 | `model/embedding.py` | `EmbeddingProjection`: linear projection from 2048 pooled features to 64 dimensions by default; optional L2 normalization |
 | `utils/metric_learning.py` | Training-pair construction, contrastive loss, deterministic KNN with uniform or distance weighting |
-| `model/deep_rbf.py` | `DeepRBF`: independent projection, two trainable centres, L1/L2 distance computation, centre initialization and rejection decisions |
+| `model/rbf.py` | `CentreRBF`: independent projection, two trainable centres, L1/L2 distance computation, centre initialization and rejection decisions |
 | `utils/rbf_loss.py` | `RBFLoss`: known-class attraction/repulsion and balanced nonempty rejected-origin groups |
-| `utils/b4_pipeline.py` | Baseline/stage loading, metadata and membership checks, frozen feature extraction, prediction generation, metrics, reports and atomic checkpoint saving |
-| `train_b4.py` | Run one metric or RBF experiment for one development fold; restore optimizer/model state with `--resume` |
-| `eval_b4.py` | Reload a saved B4 stage and its source backbone; export validation or explicitly unlocked test decisions |
-| `tests/test_b4_models.py` | Projection, pairing, loss-equation/gradient, KNN, RBF-distance, rejection-boundary and reporting checks |
-| `tests/test_b4_pipeline.py` | Synthetic training/resume/reload, source preservation, membership/provenance, empty-validation and test-lock checks |
-| `README/B4_METRIC_RBF.md` | Detailed commands, equations, choices and limitations |
+| `utils/representation_pipeline.py` | Baseline/stage loading, metadata and membership checks, frozen feature extraction, prediction generation, metrics, reports and atomic checkpoint saving |
+| `train_representation.py` | Run one metric or RBF experiment for one development fold; restore optimizer/model state with `--resume` |
+| `eval_representation.py` | Reload a saved B4 stage and its source backbone; export validation or explicitly unlocked test decisions |
+| `tests/test_representation_models.py` | Projection, pairing, loss-equation/gradient, KNN, RBF-distance, rejection-boundary and reporting checks |
+| `tests/test_representation_pipeline.py` | Synthetic training/resume/reload, source preservation, membership/provenance, empty-validation and test-lock checks |
+| `README/METRIC_LEARNING_AND_RBF.md` | Detailed commands, equations, choices and limitations |
 | `README/ReadMEArya2.md` | This implementation handoff and status record |
 
-Two existing files were updated: `model/__init__.py` exports `EmbeddingProjection` and `DeepRBF`; the root `README.md` links to the B4 documentation.
+Two existing files were updated: `model/__init__.py` exports `EmbeddingProjection` and `CentreRBF`; the root `README.md` links to the B4 documentation.
 
 The existing baseline `train.py`, `eval.py`, `extract_embeddings.py`, WideResNet implementation, label-generation code, fold builders and preprocessing implementation were not rewritten in this phase. No dependency was added. Dataset annotations, raw images, traces and the roadmap PDF were not edited by this work.
 
@@ -177,7 +183,7 @@ The checkpoint references the original frozen baseline rather than duplicating i
 
 Training requests only train and validation features. The script uses a fixed final epoch budget; it does not choose a best epoch or tune settings on test data. Evaluation checks the saved training identities and KNN bank against the exact manifest and rejects evaluation-participant overlap.
 
-`eval_b4.py --split test` requires `--confirm-heldout-test`. That explicit unlock is for the later frozen final protocol. Fold 22 is supported with an empty validation table and null metrics, rather than an invented validation score.
+`eval_representation.py --split test` requires `--confirm-heldout-test`. That explicit unlock is for the later frozen final protocol. Fold 22 is supported with an empty validation table and null metrics, rather than an invented validation score.
 
 ## 8. How to run it
 
@@ -185,7 +191,7 @@ Run from the repository root in the existing environment:
 
 ```bash
 source .venv/bin/activate
-python -m pytest -q tests/test_b4_models.py tests/test_b4_pipeline.py
+python -m pytest -q tests/test_representation_models.py tests/test_representation_pipeline.py
 ```
 
 A real-data run first needs a valid fold-specific baseline checkpoint. At the implementation handoff, none was present in this checkout. After finishing the baseline stage, replace the path below with its actual final checkpoint path:
@@ -193,22 +199,22 @@ A real-data run first needs a valid fold-specific baseline checkpoint. At the im
 ```bash
 BASELINE="/absolute/path/to/fold01_focal_last.pt"
 
-python train_b4.py --branch metric --fold-id 1 \
+python train_representation.py --branch metric --fold-id 1 \
   --baseline-checkpoint "$BASELINE" \
   --epochs 30 --embedding-dim 64 --margin 1.0 \
   --knn-k 3 --distance l2 --knn-weighting uniform \
-  --output-dir outputs/b4/metric_fold01
+  --output-dir outputs/representations/metric_fold01
 ```
 
 For a separate RBF experiment:
 
 ```bash
-python train_b4.py --branch rbf --fold-id 1 \
+python train_representation.py --branch rbf --fold-id 1 \
   --baseline-checkpoint "$BASELINE" \
   --distance l1 --epochs 30 --embedding-dim 64 \
   --known-margin 1.0 --reject-margin 1.0 --beta 1.0 \
   --distance-threshold 1.0 --gap-threshold 0.1 \
-  --output-dir outputs/b4/rbf_l1_fold01
+  --output-dir outputs/representations/rbf_l1_fold01
 ```
 
 These are runnable command forms once the baseline path is supplied; the numeric values are illustrative development settings. Repeat with L2 in its own directory for that comparison. Repeat the same training command with `--resume` to continue its stage.
@@ -216,8 +222,8 @@ These are runnable command forms once the baseline path is supplied; the numeric
 Independent validation reload:
 
 ```bash
-python eval_b4.py --checkpoint outputs/b4/metric_fold01/last.pt \
-  --split val --output-dir outputs/b4/metric_fold01/reloaded_val
+python eval_representation.py --checkpoint outputs/representations/metric_fold01/last.pt \
+  --split val --output-dir outputs/representations/metric_fold01/reloaded_val
 ```
 
 Use the RBF checkpoint path to reload that branch. Additional settings include `--lr`, `--weight-decay`, `--seed`, `--device` and `--feature-batch-size`; see each command's `--help` and the detailed B4 guide.
@@ -240,7 +246,7 @@ These output files use a B4 schema. The existing baseline `aggregate_validation.
 
 ## 10. Verification actually performed
 
-The final B4-specific verification run passed **24 tests**. The lifecycle cases include the metric branch, RBF L1 and RBF L2.
+The initial representation verification run passed **24 tests**; the subsequent audit added numerical-gradient, learning-behavior and inference-label-isolation checks, bringing this subset to **34 tests**. The lifecycle cases include the metric branch, RBF L1 and RBF L2.
 
 | Area | Checked behavior |
 | --- | --- |
@@ -255,7 +261,7 @@ The final B4-specific verification run passed **24 tests**. The lifecycle cases 
 
 Lifecycle tests use synthetic images and a small stand-in backbone. One case deletes the test image before training to verify that the run does not need test pixels. These tests establish software behavior, not classification quality on the research data.
 
-A separate broader-suite run still encountered the pre-existing failure in `tests/test_preprocessing_entrypoints.py`: its small model double no longer matches the current baseline trainer's model interface. The B4-specific passing count must not be read as a claim that the entire project suite is green.
+The initial broader-suite run found an outdated model double in `tests/test_preprocessing_entrypoints.py`. The audit updated that test to exercise the actual epoch/prediction/reload paths with a compatible small model and the final checkpoint. The current full suite passes **102 tests**; data-policy reconciliation and real-data model validation remain separate requirements.
 
 ## 11. What remains and which task owns it
 
@@ -263,7 +269,6 @@ A separate broader-suite run still encountered the pre-existing failure in `test
 | --- | --- |
 | Reconcile the current annotation generator/validator contract: 589 preserved raw entries versus the new validator's 442 retained-doctor expectation | Earlier A1/A2 integration |
 | Reconcile the existing participant inventory with the new fold builder's expectation that empty participants are absent | Earlier A3 integration |
-| Update the outdated baseline training/evaluation integration test | Earlier B1/B2 integration |
 | Finish and verify a real fold-specific baseline checkpoint | B2 |
 | Run B4 on actual research images through training, resume, independent reload and validation | B4 validation |
 | Select epoch budget, learning rate, contrastive margin, KNN settings, RBF margins/beta and rejection thresholds using development data | B4 experiments; automatic search is not implemented |

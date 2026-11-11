@@ -1,7 +1,7 @@
 # ParkinsonAiResearch --- راهنمای تحویل و شروع فاز Preprocessing
 
 > **B1 update:** Preprocessing and data loading are now implemented. The current
-> usage, verification results and limitations are in [B1_PREPROCESSING.md](B1_PREPROCESSING.md).
+> usage, verification results and limitations are in [ReadMEArya1.md](ReadMEArya1.md).
 > The active implementation is in `data/dataloader.py`, with settings in `config/data_config.py`
 > and review helpers in `utils/`, following the supplied project layout. Descriptions below of a
 > separate preprocessing module refer to the earlier A-phase proposal.

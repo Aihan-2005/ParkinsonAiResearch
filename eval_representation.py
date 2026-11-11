@@ -1,11 +1,11 @@
-"""Reload a B4 stage and export image decisions with the original frozen backbone."""
+"""Reload a Representation stage and export image decisions with the original frozen backbone."""
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
 
 from config import DATA, ROOT_DIR
-from utils.b4_pipeline import extract_features, load_stage, predict_stage, write_predictions
+from utils.representation_pipeline import extract_features, load_stage, predict_stage, write_predictions
 from utils.loops import select_device
 
 
@@ -36,7 +36,7 @@ def main() -> None:
     rows = predict_stage(model, data, checkpoint, device)
     output_dir = args.output_dir or args.checkpoint.parent / "evaluation" / args.split
     report = write_predictions(output_dir, rows, checkpoint, split=args.split)
-    print(f"B4 {checkpoint['config']['branch']} | split={args.split} | images={len(rows)}")
+    print(f"Representation {checkpoint['config']['branch']} | split={args.split} | images={len(rows)}")
     if report["metrics"] is not None:
         print(f"Accuracy={report['metrics']['accuracy']:.3f} | coverage={report['metrics']['coverage']:.3f}")
     print(f"Predictions and report: {output_dir}")

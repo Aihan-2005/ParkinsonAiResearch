@@ -1,4 +1,10 @@
-"""Restricted learned-centre RBF variant from roadmap p16, not the original code."""
+"""Learned-centre distance head: a restricted RBF comparator, not an affine Deep-RBF.
+
+The frozen feature extractor is supplied by the representation pipeline. This
+module owns only the linear projection, class centres and distance/rejection
+rules. Training loss is in utils/rbf_loss.py. In particular, class-specific
+affine units and the original paper's powered L2 distances are not implemented.
+"""
 from __future__ import annotations
 
 import math
@@ -9,7 +15,8 @@ from torch import nn
 from .embedding import EmbeddingProjection
 
 
-class DeepRBF(nn.Module):
+class CentreRBF(nn.Module):
+    """Two known-class prototypes with L1 or unsquared Euclidean distances."""
     def __init__(self, input_dim: int = 2048, embedding_dim: int = 64,
                  distance: str = "l1", normalize: bool = False) -> None:
         super().__init__()
@@ -20,6 +27,10 @@ class DeepRBF(nn.Module):
         self.distance = distance
 
     def distances(self, embeddings: torch.Tensor) -> torch.Tensor:
+        if embeddings.ndim != 2 or embeddings.shape[1] != self.projection.embedding_dim:
+            raise ValueError(f"Expected embeddings [N,{self.projection.embedding_dim}]")
+        if not embeddings.is_floating_point() or not torch.isfinite(embeddings).all():
+            raise ValueError("Embeddings must contain finite floating point values")
         delta = embeddings[:, None, :] - self.centres[None, :, :]
         # L2 is the Euclidean norm, never squared L2. vector_norm has finite
         # zero subgradients at identical points (no artificial epsilon radius).
@@ -30,11 +41,15 @@ class DeepRBF(nn.Module):
 
     @torch.no_grad()
     def initialize_centres(self, features: torch.Tensor, targets: torch.Tensor) -> None:
+        if targets.shape != (len(features),) or targets.dtype != torch.long:
+            raise ValueError("Expected one int64 expert target per training feature")
+        if ((targets < 0) | (targets > 2)).any():
+            raise ValueError("Expert targets must use Control=0, Parkinson=1, Unknown=2")
+        if not all((targets == label).any() for label in (0, 1)):
+            raise ValueError("RBF training requires both known classes in the training fold")
         z = self.projection(features)
         for label in (0, 1):
             mask = targets == label
-            if not mask.any():
-                raise ValueError("RBF training requires both known classes in the training fold")
             self.centres[label].copy_(z[mask].mean(dim=0))
 
 

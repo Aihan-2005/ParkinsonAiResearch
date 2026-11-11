@@ -1,11 +1,11 @@
 import pytest
 import torch
 
-from model.deep_rbf import DeepRBF, reject_distances
+from model.rbf import CentreRBF, reject_distances
 from model.embedding import EmbeddingProjection
 from utils.metric_learning import ContrastiveLoss, knn_predict, make_contrastive_pairs
 from utils.rbf_loss import RBFLoss
-from utils.b4_pipeline import prediction_metrics
+from utils.representation_pipeline import prediction_metrics
 
 
 def test_projection_is_separate_linear_2048_to_64_with_optional_normalization():
@@ -69,7 +69,7 @@ def test_knn_train_bank_only_ties_zero_distances_and_distance_units():
 
 @pytest.mark.parametrize("norm,expected", [("l1", 7.), ("l2", 5.)])
 def test_rbf_distances_are_nonnegative_and_l2_is_not_squared(norm, expected):
-    model = DeepRBF(input_dim=2, embedding_dim=2, distance=norm)
+    model = CentreRBF(input_dim=2, embedding_dim=2, distance=norm)
     d = model.distances(torch.tensor([[3., 4.]]))
     torch.testing.assert_close(d, torch.full((1, 2), expected))
 
@@ -103,7 +103,7 @@ def test_rbf_invalid_reject_origin_cannot_be_silently_dropped():
 
 def test_rbf_projection_centres_train_with_finite_zero_distance_gradients():
     torch.manual_seed(4)
-    model = DeepRBF(input_dim=3, embedding_dim=2)
+    model = CentreRBF(input_dim=3, embedding_dim=2)
     x, y = torch.randn(5, 3), torch.tensor([0, 1, 2, 2, 0])
     model.initialize_centres(x, y)
     loss = RBFLoss()(model(x), y, torch.tensor([0, 1, 0, 1, 0]))
@@ -133,3 +133,80 @@ def test_reporting_keeps_rejected_pd_in_recall_and_undefined_denominators():
     assert metrics["per_class"]["parkinson"]["precision"] is None
     assert prediction_metrics([]) is None
     assert prediction_metrics(rows[:1])["accepted_accuracy"] is None
+
+
+def test_contrastive_derivatives_match_numerical_finite_differences():
+    z = torch.tensor([[0.1, .3], [.4, .2], [.7, .8]], dtype=torch.float64, requires_grad=True)
+    left, right, same = torch.tensor([0, 0]), torch.tensor([1, 2]), torch.tensor([True, False])
+    assert torch.autograd.gradcheck(lambda values: ContrastiveLoss(2.0)(values, left, right, same), (z,))
+
+
+def test_rbf_loss_derivatives_match_numerical_finite_differences():
+    d = torch.tensor([[.2, .8], [.7, .4], [.3, .4], [.8, .7]],
+                     dtype=torch.float64, requires_grad=True)
+    y, clinical = torch.tensor([0, 1, 2, 2]), torch.tensor([1, 0, 0, 1])
+    assert torch.autograd.gradcheck(lambda values: RBFLoss(beta=.7)(values, y, clinical), (d,))
+
+
+@pytest.mark.parametrize("norm", ["l1", "l2"])
+def test_rbf_feature_gradients_match_numerical_finite_differences(norm):
+    torch.manual_seed(3)
+    model = CentreRBF(2, 2, distance=norm).double()
+    with torch.no_grad():
+        model.centres.copy_(torch.tensor([[-2., -1.], [2., 1.]], dtype=torch.float64))
+    x = torch.tensor([[.2, .6], [.5, .9]], dtype=torch.float64, requires_grad=True)
+    assert torch.autograd.gradcheck(model, (x,))
+
+
+def test_centre_initialization_rejects_bad_labels_before_changing_either_centre():
+    model = CentreRBF(2, 2)
+    before = model.centres.detach().clone()
+    with pytest.raises(ValueError, match="both known"):
+        model.initialize_centres(torch.randn(3, 2), torch.zeros(3, dtype=torch.long))
+    torch.testing.assert_close(before, model.centres)
+    with pytest.raises(ValueError, match="expert target"):
+        model.initialize_centres(torch.randn(3, 2), torch.zeros(3))
+    with pytest.raises(ValueError, match="embeddings"):
+        model.distances(torch.ones(2, 1, 2))
+
+
+def test_contrastive_training_learns_a_separable_toy_embedding():
+    x = torch.tensor([[-1., 0.], [-1.1, .1], [1., 0.], [1.1, .1], [0., 1.], [.1, 1.1]])
+    y = torch.tensor([0, 0, 1, 1, 2, 2])
+    model = EmbeddingProjection(2, 2)
+    with torch.no_grad():
+        model.linear.weight.copy_(torch.eye(2) * .05)
+        model.linear.bias.zero_()
+    left, right, same, _ = make_contrastive_pairs(y, [f"p{i}" for i in range(6)])
+    criterion = ContrastiveLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=.03)
+    initial = criterion(model(x), left, right, same).item()
+    for _ in range(150):
+        optimizer.zero_grad()
+        criterion(model(x), left, right, same).backward()
+        optimizer.step()
+    assert criterion(model(x), left, right, same).item() < initial * .1
+    queries = torch.tensor([[-1.05, .05], [1.05, .05], [.05, 1.05]])
+    predictions, _ = knn_predict(model(queries), model(x), y, k=1)
+    assert predictions.tolist() == [0, 1, 2]
+
+
+@pytest.mark.parametrize("norm", ["l1", "l2"])
+def test_centre_rbf_learns_known_classes_and_both_rejected_origins(norm):
+    x = torch.tensor([[-.3, -.02], [-.3, .02], [.3, -.02], [.3, .02], [0., .2], [0., -.2]])
+    y, clinical = torch.tensor([0, 0, 1, 1, 2, 2]), torch.tensor([0, 0, 1, 1, 0, 1])
+    model = CentreRBF(2, 2, distance=norm)
+    with torch.no_grad():
+        model.projection.linear.weight.copy_(torch.eye(2))
+        model.projection.linear.bias.zero_()
+    model.initialize_centres(x, y)
+    criterion = RBFLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=.01)
+    initial = criterion(model(x), y, clinical).item()
+    for _ in range(300):
+        optimizer.zero_grad()
+        criterion(model(x), y, clinical).backward()
+        optimizer.step()
+    assert criterion(model(x), y, clinical).item() < initial * .1
+    predictions, _ = reject_distances(model(x), distance_threshold=.75, gap_threshold=.1)
+    assert predictions.tolist() == [0, 0, 1, 1, 2, 2]

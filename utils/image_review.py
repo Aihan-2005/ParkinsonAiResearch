@@ -102,7 +102,7 @@ def create_review_grid(
     width, header_height, row_height = 1050, 76, 300
     canvas = Image.new("RGB", (width, header_height + row_height * len(selected)), "white")
     draw = ImageDraw.Draw(canvas)
-    draw.text((20, 12), "B1 preprocessing review - DEVELOPMENT IMAGES ONLY", fill="black")
+    draw.text((20, 12), "Image preprocessing review - DEVELOPMENT IMAGES ONLY", fill="black")
     draw.text((20, 36), "Original (white alpha background)", fill="black")
     draw.text((680, 36), "Model input (normalization inverted)", fill="black")
     records = []

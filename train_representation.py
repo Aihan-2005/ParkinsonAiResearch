@@ -1,4 +1,4 @@
-"""Fit one B4 branch on a single development fold's frozen baseline features."""
+"""Fit one Representation branch on a single development fold's frozen baseline features."""
 from __future__ import annotations
 
 import argparse
@@ -10,7 +10,7 @@ from pathlib import Path
 import torch
 
 from config import CLASS_NAMES, DATA, ROOT_DIR
-from utils.b4_pipeline import (
+from utils.representation_pipeline import (
     FIDELITY_NOTE, FORMAT_VERSION, atomic_checkpoint, build_stage, config_digest, extract_features,
     load_baseline, predict_stage, write_predictions,
 )
@@ -114,7 +114,7 @@ def main() -> None:
             name for name, count in diagnostics["rejected_group_counts"].items() if count == 0
         ]
     digest = config_digest(config, source)
-    output_dir = args.output_dir or ROOT_DIR / "outputs" / "b4" / f"{args.branch}_fold{args.fold_id:02d}_{digest}"
+    output_dir = args.output_dir or ROOT_DIR / "outputs" / "representations" / f"{args.branch}_fold{args.fold_id:02d}_{digest}"
     last_path = output_dir / "last.pt"
     if args.resume and not last_path.is_file():
         raise ValueError(f"Resume checkpoint does not exist: {last_path}")
@@ -158,7 +158,7 @@ def main() -> None:
             "training_diagnostics": diagnostics, "fidelity_note": FIDELITY_NOTE,
         }
 
-    print(f"B4 {args.branch} | fold={args.fold_id} | train={len(train.rows)} val={len(validation.rows)} | {device}")
+    print(f"Representation {args.branch} | fold={args.fold_id} | train={len(train.rows)} val={len(validation.rows)} | {device}")
     print(json.dumps(diagnostics, sort_keys=True))
     for epoch in range(start_epoch, args.epochs + 1):
         model.train()
@@ -168,13 +168,13 @@ def main() -> None:
         else:
             loss = criterion(model(x), y, clinical)
         if not torch.isfinite(loss):
-            raise ValueError("Nonfinite B4 training loss")
+            raise ValueError("Nonfinite Representation training loss")
         loss.backward()
         if any(p.grad is not None and not torch.isfinite(p.grad).all() for p in model.parameters()):
-            raise ValueError("Nonfinite B4 gradient")
+            raise ValueError("Nonfinite Representation gradient")
         optimizer.step()
         if any(not torch.isfinite(p).all() for p in model.parameters()):
-            raise ValueError("Nonfinite B4 model parameters after optimizer step")
+            raise ValueError("Nonfinite Representation model parameters after optimizer step")
         history.append({"epoch": epoch, "training_loss_before_update": float(loss.detach())})
         atomic_checkpoint(last_path, payload(epoch))
         print(f"Epoch {epoch:03d}/{args.epochs} | loss={float(loss.detach()):.6f}")

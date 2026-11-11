@@ -4,7 +4,7 @@
 
 **Scope:** The image-input part of task **B1** on page 21 of the implementation roadmap, up to the WideResNet model.
 
-This file documents Arya's implementation alongside the teammate's READMEs. The data and fold handoff is in [MOJI2.md](MOJI2.md); the detailed B1 usage guide is in [B1_PREPROCESSING.md](B1_PREPROCESSING.md).
+This file documents Arya's implementation alongside the teammate's READMEs. The data and fold handoff is in [MOJI2.md](MOJI2.md). This file contains the preprocessing usage guide.
 
 ## 1. Work completed
 
@@ -38,7 +38,7 @@ The implementation follows the supplied project structure, using `config/`, `dat
 | `train.py` | Connect training/validation transforms and save preprocessing metadata in checkpoints and history |
 | `eval.py` | Restore and verify the same preprocessing configuration during evaluation |
 | `tests/` | Transform, Dataset, DataLoader, leakage, grid and train/evaluation integration tests |
-| `requirements-b1-lock.txt` | Exact package versions used in the verified environment |
+| `requirements-lock.txt` | Exact package versions used in the verified environment |
 
 The unused top-level `preprocessing/` folder was removed. Preprocessing runs inside `data/dataloader.py`. The separate `outputs/preprocessing/` directory contains generated reports and images, not implementation code.
 
@@ -142,7 +142,7 @@ For a fresh checkout, the verified environment uses Python 3.11 on macOS ARM64:
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements-b1-lock.txt
+python -m pip install -r requirements-lock.txt
 ```
 
 For data stored elsewhere:
@@ -170,7 +170,7 @@ Generated files under `outputs/preprocessing/`:
 | `development_review.png` | Original versus processed images; normalization is inverted for display |
 | `review_selection.json` | Fixed drawing IDs for repeating the same grid |
 | `review_grid.json` | Source hashes, selection reasons, dimensions, pipeline metadata and QC-only flags |
-| `b1_report.json` | Counts, batch shapes, labels, source-integrity checks and manifest-integrity checks |
+| `input_report.json` | Counts, batch shapes, labels, source-integrity checks and manifest-integrity checks |
 | `fold_checks.json` | Training/validation counts for each fold and raw-file hash comparison |
 | `setup_report.json` | Local dataset setup provenance |
 

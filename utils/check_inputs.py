@@ -1,4 +1,4 @@
-"""Check the B1 input contract and save a development-only visual review."""
+"""Check the Image input contract and save a development-only visual review."""
 from __future__ import annotations
 
 import argparse
@@ -76,9 +76,9 @@ def check_inputs(*, manifest: Path, root: Path, fold_id: int = 1,
     grid = create_review_grid(rows, root=root, transform=transforms["val"],
                               output_dir=output_dir, selection_path=selection_path)
     if any(source_sha256(Path(path)) != digest for path, digest in hashes_before.items()):
-        raise RuntimeError("Raw image changed during the B1 check")
+        raise RuntimeError("Raw image changed during the input check")
     if source_sha256(manifest) != manifest_hash:
-        raise RuntimeError("Manifest changed during the B1 check")
+        raise RuntimeError("Manifest changed during the input check")
     report = {"status": "ok", "fold_id": fold_id, "manifest_sha256": manifest_hash,
               "transform": transforms["val"].metadata(), "seed": seed, "num_workers": num_workers,
               "class_to_index": {name: i for i, name in enumerate(CLASS_NAMES)}, "splits": summaries,
@@ -86,7 +86,7 @@ def check_inputs(*, manifest: Path, root: Path, fold_id: int = 1,
               "test_images_opened": 0, "raw_sources_unchanged": True,
               "manifest_unchanged": True, "review_samples": len(grid["samples"]),
               "review_approval": grid["approval_status"]}
-    write_json(Path(output_dir) / "b1_report.json", report)
+    write_json(Path(output_dir) / "input_report.json", report)
     return report
 
 
@@ -106,7 +106,7 @@ def main() -> None:
                           image_size=args.image_size, batch_size=args.batch_size,
                           num_workers=args.num_workers, seed=args.seed, output_dir=args.output_dir,
                           selection_path=args.selection)
-    print(f"B1 input check passed: {report['development_images_loaded']} development images; "
+    print(f"Image input check passed: {report['development_images_loaded']} development images; "
           f"train={report['splits']['train']['samples']}, val={report['splits']['val']['samples']}.")
     print(f"Review grid and report: {args.output_dir}")
 
