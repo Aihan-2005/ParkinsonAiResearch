@@ -1,7 +1,5 @@
 # ParkinsonAiResearch
 
-Repeated development evaluation: [pooled held-out predictions, missing-subject reporting and summaries across seeds](README/DEVELOPMENT_EVALUATION.md).
-
 WideResNet + CE / focal: [thesis comparison, implementation audit and run commands](README/WIDERESNET_BASELINES.md).
 The complete [baseline notebook](notebooks/01_wideresnet50_2.ipynb) calls the same training scripts.
 

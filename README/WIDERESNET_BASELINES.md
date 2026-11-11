@@ -160,12 +160,6 @@ so 50 completed models can occupy many GB. Preserve checkpoints to resume.
 
 ## Aggregate after all 25 folds
 
-For the full evaluation across predetermined seeds, use
-[`evaluate_development.py`](DEVELOPMENT_EVALUATION.md). It keeps the same workbook
-assignments, retains available held-out predictions from incomplete pairs, and
-reports image-weighted and subject-balanced metrics plus variation across seeds.
-The commands below remain useful for a single seed or a pilot.
-
 ```bash
 python aggregate_validation.py --loss cross_entropy --freeze-policy early --seed 42 \
   --predictions-dir outputs/baselines/cross_entropy/validation_predictions \
@@ -190,29 +184,111 @@ Keep final test data out of tuning.
 
 ## Colab / VS Code notebook
 
-Run locally:
+The notebook supports a Colab GPU kernel from either VS Code or Colab in the
+browser. The notebook editor can stay on your Mac while Python, image loading
+and training run on Google's machine. A remote kernel cannot read your Mac's
+Desktop paths; the code and dataset must also be available on the remote machine.
+
+### 1. Shared dataset and separate model code
+
+The full reusable dataset has already been uploaded to the connected Google
+account `aryakargar85@gmail.com` at
+`My Drive/ParkinsonResearch/datasets/parkinson_dataset_v1.zip`. All model
+notebooks can reuse this version without another dataset upload.
+
+The updated notebook uses this shared dataset and a separate code archive.
+Create a code snapshot locally after code changes:
 
 ```bash
-python prepare_colab_upload.py
+cd "/Users/arya/Desktop/Parkinson Prediction Research/ParkinsonAiResearch"
+python3 prepare_colab_code.py
 ```
 
-Open `notebooks/01_wideresnet50_2.ipynb` in a GPU runtime, upload
-`outputs/colab_upload/wideresnet_development.zip` when prompted, then run the cells
-in order. It runs both losses, initially on fold 1. Set `FOLD_END = 25` for the full
-development comparison. It uses the same settings as the terminal commands.
-The archive's manifest is development-only and rewrites paths for portability,
-so its hash differs from the full local manifest; source/export hashes are saved
-in `upload_manifest.json`. Keep each environment's outputs separate.
+The snapshot is `outputs/colab_upload/parkinson_training_code_v1.zip`. It has
+been uploaded to `My Drive/ParkinsonResearch` with explicit user approval.
+The training notebook can load both code and data directly from Drive.
+The local notebook has the exact expected archive checksum. When preparing a
+new code snapshot, update that checksum deliberately or use a new version.
+
+Expected Drive layout before training:
+
+```text
+My Drive/
+  ParkinsonResearch/
+    datasets/parkinson_dataset_v1.zip
+    parkinson_training_code_v1.zip
+```
+
+The shared dataset retains the original relative paths, finalized labels,
+eligibility flags and prescribed fold assignments. It includes locked test data;
+the training commands still select only development train/validation rows.
+`DATA_ROOT` points to `/content/ParkinsonData`, `DATASET_DIR` to its `datasets`
+subdirectory and `MANIFEST` to `datasets/annotations/fold_manifest.csv`.
+`--root` and `--manifest` are already wired in the notebook. Keep local and Colab
+outputs separate.
+
+### 2. Connect the notebook to a GPU
+
+**VS Code:** install the Microsoft **Python** and **Jupyter** extensions and the
+official [Google Colab extension](https://marketplace.visualstudio.com/items?itemName=google.colab).
+Open `notebooks/01_wideresnet50_2.ipynb`, click **Select Kernel > Colab > New Colab
+Server**, sign in to Google and choose an available GPU machine, then its Python
+kernel. The exact choices depend on your account and availability. See the
+[official extension guide](https://github.com/googlecolab/colab-vscode/wiki/User-Guide).
+
+**Browser:** open [Colab](https://colab.research.google.com/), choose **File >
+Upload notebook** and select `notebooks/01_wideresnet50_2.ipynb`. Choose **Runtime
+> Change runtime type > GPU**, then connect. Saving a copy to Drive keeps your
+notebook edits there too.
+
+### 3. Run the cells
+
+Run the setup cell and authorize Drive access using the same account that holds
+the dataset. It mounts `/content/drive`, verifies and extracts the shared data
+to `/content/ParkinsonData` and the separate model code to
+`/content/ParkinsonAiResearch`, installs requirements and prints the GPU name.
+If you used a different Drive folder, edit `DRIVE_DIR` in that cell. If Drive
+authorization does not open in VS Code, update the Colab extension and use
+**Colab: Mount Google Drive to Server...** in the command palette, then rerun.
+
+Training reads images from the extracted runtime disk. This follows Google's
+[recommendation to copy an archive from Drive and extract it locally](https://research.google.com/colaboratory/faq.html),
+which avoids repeated small image reads through Drive. Checkpoints, predictions,
+reports and results ZIPs are written to Drive automatically:
+
+```text
+My Drive/ParkinsonResearch/runs/baselines_shared_dataset_v1/
+  cross_entropy/checkpoints/
+  cross_entropy/validation_predictions/
+  cross_entropy/reports/
+  focal/checkpoints/
+  focal/validation_predictions/
+  focal/reports/
+  baseline_results.zip
+```
+
+Run with `FOLD_END = 1` first, then set `FOLD_END = 25` and rerun configuration and
+training for the full development comparison. Both losses use the same settings
+as the terminal commands.
 
 The final cell saves a small JSON/CSV results ZIP. It excludes checkpoints. In
-Colab, choose persistent checkpoint storage or download the checkpoints before
-the runtime ends. Rebuilding the upload archive is necessary after code/data
-changes; the generated ZIP is ignored by Git.
+VS Code, download this ZIP from Drive instead of relying on the browser-specific
+`files.download()` widget. Full model/optimizer checkpoints can occupy many GB,
+so check Drive space before running all folds for both losses.
+
+### 4. Continue after a runtime ends
+
+Colab's `/content` disk is temporary. Reconnect to a GPU and rerun setup,
+configuration and the desired training cells with the same ZIP, settings and
+Drive output folder. Existing `--resume` behavior restores the last saved epoch;
+an interrupted epoch is repeated. Completed folds are reused. Use a new output
+folder when changing the training recipe. Code and dataset archives can be
+versioned separately. Generated archives are ignored by Git.
 
 ## Verification
 
 - Data validation passes on the active cleaned annotations and fold manifest.
-- The full suite passes: **108 tests**. Checks cover loss behavior, frozen-stage statistics/gradients,
+- The full suite passes: **121 tests**. Checks cover loss behavior, frozen-stage statistics/gradients,
   train/evaluation reload, sampling isolation, seeded augmentation, both-loss
   CPU resume equivalence, epoch-budget guards and OOF aggregation.
 - A full WideResNet forward/backward check uses a real training batch at

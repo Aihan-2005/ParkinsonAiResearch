@@ -11,9 +11,8 @@ from pathlib import Path
 from config import DATA, MODEL, ROOT_DIR, TRAIN
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        allow_abbrev=False,
         description=(
             "Run independent training for TLO development folds 1..25. "
             "The locked test folds 26..34 are never passed to train.py."
@@ -55,7 +54,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--summary-path", type=Path, default=None)
-    return parser.parse_args(argv)
+    return parser.parse_args()
 
 
 def main() -> None:

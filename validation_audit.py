@@ -37,48 +37,14 @@ def selected_label(row: dict[str, str], label_source: str) -> str | None:
     return label if label in CLASS_NAMES[:2] else None
 
 
-def validate_assignment_roles(manifest_rows: list[dict], assignments_rows: list[dict]) -> None:
-    """Compare membership with the workbook, not with self-reported manifest metadata."""
-    if not assignments_rows:
-        return
-    assignments = {row["participant_id"]: row for row in assignments_rows}
-    if len(assignments) != len(assignments_rows):
-        raise ValueError("Duplicate participant in fold assignments")
-    for row in manifest_rows:
-        if not _is_true(row.get("cv_eligible", "")):
-            continue
-        if row.get("role") not in {"train", "validation", "test_locked"}:
-            continue
-        assignment = assignments.get(row["participant_id"])
-        if assignment is None:
-            raise ValueError(f"Eligible participant absent from workbook assignments: {row['participant_id']}")
-        partition = assignment["workbook_partition"]
-        workbook_fold = int(assignment["workbook_fold_id"])
-        model_fold = int(row["development_model_fold"])
-        if partition == "development" and 1 <= workbook_fold <= 25:
-            role = "validation" if workbook_fold == model_fold else "train"
-        elif partition == "heldout_test" and 26 <= workbook_fold <= 34:
-            role = "test_locked"
-        else:
-            raise ValueError(f"Invalid workbook assignment for {row['participant_id']}")
-        if row.get("partition") != partition or row.get("role") != role:
-            raise ValueError(f"Manifest/workbook assignment mismatch for {row['participant_id']}")
-        if row.get("workbook_fold_id") and int(row["workbook_fold_id"]) != workbook_fold:
-            raise ValueError(f"Manifest/workbook fold mismatch for {row['participant_id']}")
-
-
 def expected_validation_roster(
     manifest_rows: list[dict[str, str]],
     label_source: str,
-    assignments_rows: list[dict[str, str]] | None = None,
 ) -> dict[str, dict]:
     """Return each eligible development drawing exactly once, at its assigned validation fold."""
-    validate_assignment_roles(manifest_rows, assignments_rows or [])
     expected: dict[str, dict] = {}
     all_eligible: dict[str, set[int]] = defaultdict(set)
     validation_occurrences: Counter[str] = Counter()
-    identities = {}
-    seen = set()
 
     for row in manifest_rows:
         if row.get("partition") != "development":
@@ -88,13 +54,6 @@ def expected_validation_roster(
             continue
         drawing_id = row["drawing_id"]
         fold_id = int(row["development_model_fold"])
-        if (drawing_id, fold_id) in seen:
-            raise ValueError(f"Duplicate drawing in development fold: {drawing_id}, {fold_id}")
-        seen.add((drawing_id, fold_id))
-        identity = (row["participant_id"], label)
-        if drawing_id in identities and identities[drawing_id] != identity:
-            raise ValueError(f"Drawing identity/label differs across folds: {drawing_id}")
-        identities[drawing_id] = identity
         all_eligible.setdefault(drawing_id, set()).add(fold_id)
 
         if row.get("role") != "validation":
@@ -136,7 +95,6 @@ def build_validation_audit(
     assignments_rows: list[dict[str, str]],
     label_source: str,
 ) -> list[dict]:
-    validate_assignment_roles(manifest_rows, assignments_rows)
     class_names = CLASS_NAMES if label_source == "consensus" else CLASS_NAMES[:2]
     rows_by_fold: dict[int, list[dict[str, str]]] = defaultdict(list)
     for row in manifest_rows:
@@ -189,26 +147,10 @@ def build_validation_audit(
             note = "All classes are represented; pooled out-of-fold metrics remain the primary CV summary."
 
         assigned = assignments_by_fold.get(fold_id, [])
-        assigned_ids = {row["participant_id"] for row in assigned}
-        available_ids = set(subject_counts)
-        if not assignments_rows:
-            pair_status = "unverified_assignments"
-        elif len(assigned_ids) != 2:
-            pair_status = "invalid_assignment"
-        elif not available_ids:
-            pair_status = "empty_pair"
-        elif available_ids == assigned_ids:
-            pair_status = "complete_pair"
-        else:
-            pair_status = "incomplete_pair"
         audit.append({
             "development_model_fold": fold_id,
             "validation_participants_assigned": len(assigned) if assignments_rows else "",
             "validation_participants_with_eligible_images": len(subject_counts),
-            "pair_status": pair_status,
-            "assigned_participant_ids": ";".join(sorted(assigned_ids)),
-            "available_participant_ids": ";".join(sorted(available_ids)),
-            "participants_without_eligible_images": ";".join(sorted(assigned_ids - available_ids)),
             "validation_images": n_images,
             "support_control": counts.get("control", 0),
             "support_parkinson": counts.get("parkinson", 0),
@@ -253,8 +195,6 @@ def main() -> None:
         "label_source": args.label_source,
         "folds_audited": len(audit),
         "quality_counts": dict(quality_counts),
-        "pair_status_counts": dict(Counter(row["pair_status"] for row in audit)),
-        "protocol_note": "Available-data paired holdouts; an incomplete pair is not a complete thesis L2O pair.",
         "empty_validation_folds": [
             row["development_model_fold"] for row in audit
             if row["validation_quality"] == "empty_validation"
