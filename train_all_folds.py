@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from config import DATA, MODEL, ROOT_DIR, TRAIN
+from utils.progress import emit_progress
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,6 +44,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest", type=Path, default=DATA.fold_manifest_path)
     parser.add_argument("--root", type=Path, default=ROOT_DIR)
     parser.add_argument("--checkpoint-dir", type=Path, default=TRAIN.checkpoint_dir)
+    parser.add_argument("--checkpoint-every", type=int, default=1)
+    parser.add_argument("--progress", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--progress-json", action="store_true")
     parser.add_argument("--continue-on-error", action="store_true")
     parser.add_argument(
         "--resume", action="store_true",
@@ -65,6 +69,8 @@ def main() -> None:
         raise SystemExit(f"Fold manifest not found: {args.manifest}")
     if args.resume and args.overwrite:
         raise SystemExit("--resume and --overwrite cannot be combined")
+    if args.checkpoint_every <= 0:
+        raise SystemExit("checkpoint-every must be positive")
 
     train_script = Path(__file__).resolve().with_name("train.py")
     if not train_script.is_file():
@@ -128,7 +134,11 @@ def main() -> None:
         "--manifest", str(args.manifest),
         "--root", str(args.root),
         "--checkpoint-dir", str(args.checkpoint_dir),
+        "--checkpoint-every", str(args.checkpoint_every),
     ]
+    common.append("--progress" if args.progress else "--no-progress")
+    if args.progress_json:
+        common.append("--progress-json")
     common.append("--pretrained" if args.pretrained else "--no-pretrained")
     if args.resume:
         common.append("--resume")
@@ -136,7 +146,9 @@ def main() -> None:
         common.append("--overwrite")
 
     for fold_id in range(args.fold_start, args.fold_end + 1):
-        command = [sys.executable, str(train_script), "--fold-id", str(fold_id), *common]
+        command = [sys.executable, "-u", str(train_script), "--fold-id", str(fold_id), *common]
+        if args.progress_json:
+            emit_progress("fold_start", fold=fold_id)
         print("\n" + "=" * 78)
         print(f"TLO fold {fold_id:02d}/25 | loss={args.loss} | freeze={args.freeze_policy} | seed={args.seed}")
         print("Command:", " ".join(command))
@@ -158,6 +170,8 @@ def main() -> None:
             ),
         }
         summary["runs"].append(run)
+        if args.progress_json:
+            emit_progress("fold_end", fold=fold_id, return_code=return_code)
         if return_code != 0 and not args.continue_on_error:
             break
 

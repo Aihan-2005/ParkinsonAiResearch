@@ -184,6 +184,41 @@ Keep final test data out of tuning.
 
 ## Colab / VS Code notebook
 
+### Progress bars, storage and local resume
+
+The updated notebook displays fold, epoch and batch progress, current loss,
+elapsed time and estimated remaining time for the current loss. Terminal runs
+also show epoch/batch bars. `--no-progress` disables them.
+
+The notebook sets `CHECKPOINT_EVERY = 5`, saving at epochs 5, 10 and 15. The
+final requested epoch is always saved. Up to four unsaved epochs can repeat
+after interruption. Terminal commands retain the previous every-epoch default;
+use `--checkpoint-every 5` for the notebook policy. This is an I/O setting and
+does not change the model recipe or checkpoint identity, so old compatible
+checkpoints remain resumable.
+
+Before training, configuration checks a conservative budget of about 41.3 GB
+free for 25 folds across both losses, including temporary writes and a safety
+margin. It deliberately budgets for all selected folds, even if some already
+exist. Every checkpoint save also checks the destination filesystem and keeps
+the previous completed file if writing the new temporary file fails. Drive's
+filesystem does not reliably expose account quota: on Colab enter the actual
+`DRIVE_FREE_GB` from Google's Storage page. The configuration blocks a run that
+does not fit. Do not rely on `/content` as permanent storage.
+
+To continue on your Mac, stop the Colab training cell, preserve its files,
+reload the updated notebook, select the local project Python kernel, and run
+setup/configuration with `FOLD_START = 1`, `FOLD_END = 25`. Local checkpoints
+stay under `outputs/baselines`; local fold 1 is reused. Colab checkpoints are
+not automatically downloaded or mixed into this local run. Cross-machine
+checkpoints need a separate compatibility check before reuse.
+
+The progress update is packaged locally as
+`outputs/colab_upload/parkinson_training_code_v2.zip`. The v2 archive is uploaded to
+`My Drive/ParkinsonResearch`; make sufficient Drive space available before
+starting the full comparison with a Colab kernel. Local training reads the updated
+source directly and does not need that upload.
+
 The notebook supports a Colab GPU kernel from either VS Code or Colab in the
 browser. The notebook editor can stay on your Mac while Python, image loading
 and training run on Google's machine. A remote kernel cannot read your Mac's

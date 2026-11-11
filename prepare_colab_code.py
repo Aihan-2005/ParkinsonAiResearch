@@ -12,7 +12,7 @@ def main() -> None:
     root = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path,
-                        default=root / "outputs/colab_upload/parkinson_training_code_v1.zip")
+                        default=root / "outputs/colab_upload/parkinson_training_code_v2.zip")
     args = parser.parse_args()
     paths = list(root.glob("*.py")) + [root / "requirements.txt"]
     for folder in ("config", "data", "model", "utils"):

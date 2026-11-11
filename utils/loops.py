@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
@@ -16,6 +17,7 @@ def run_epoch(
     optimizer: torch.optim.Optimizer | None = None,
     criterion: nn.Module | None = None,
     include_predictions: bool = False,
+    on_batch: Callable[[int, int, float], None] | None = None,
 ) -> dict:
 
 
@@ -26,9 +28,10 @@ def run_epoch(
     all_targets: list[int] = []
     all_predictions: list[int] = []
     prediction_rows: list[dict] = []
+    samples_seen = 0
 
     with torch.set_grad_enabled(training):
-        for batch in loader:
+        for batch_index, batch in enumerate(loader, 1):
             images = batch["image"].to(device)
             targets = batch["label"].to(device)
             if training:
@@ -46,6 +49,9 @@ def run_epoch(
             predicted_values = predicted.detach().cpu().tolist()
             all_targets.extend(target_values)
             all_predictions.extend(predicted_values)
+            samples_seen += len(targets)
+            if on_batch is not None:
+                on_batch(batch_index, len(loader), total_loss / samples_seen)
 
             if include_predictions:
                 probabilities = torch.softmax(logits.detach(), dim=1).cpu().tolist()

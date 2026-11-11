@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import shutil
 from pathlib import Path
 
 import torch
@@ -18,13 +19,31 @@ from utils.io import sha256_file, write_json
 from utils.loops import run_epoch, select_device
 from utils.losses import build_loss, inverse_frequency_alpha
 from utils.reproducibility import seed_everything
+from utils.progress import TrainingProgress
 
 
 def _save_checkpoint(path: Path, checkpoint: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    def tensor_bytes(value):
+        if isinstance(value, torch.Tensor):
+            return value.numel() * value.element_size()
+        if isinstance(value, dict):
+            return sum(tensor_bytes(item) for item in value.values())
+        if isinstance(value, (tuple, list)):
+            return sum(tensor_bytes(item) for item in value)
+        return 0
+    needed = int(tensor_bytes(checkpoint) * 1.05) + 1024 ** 2
+    if shutil.disk_usage(path.parent).free < needed:
+        raise RuntimeError(f"Not enough checkpoint storage at {path.parent}. "
+                           f"Need at least {needed / 1e9:.2f} GB free for the temporary save. "
+                           "Keep existing checkpoints, free space, then resume.")
     temporary = path.with_suffix(path.suffix + ".tmp")
-    torch.save(checkpoint, temporary)
-    os.replace(temporary, path)
+    try:
+        torch.save(checkpoint, temporary)
+        os.replace(temporary, path)
+    except (OSError, RuntimeError) as error:
+        raise RuntimeError(f"Checkpoint save failed at {path}. Check disk/Drive quota. "
+                           "Keep the previous completed checkpoint and resume after freeing space.") from error
 
 
 def _optimizer_for_model(
@@ -75,6 +94,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest", type=Path, default=DATA.fold_manifest_path)
     parser.add_argument("--root", type=Path, default=ROOT_DIR)
     parser.add_argument("--checkpoint-dir", type=Path, default=TRAIN.checkpoint_dir)
+    parser.add_argument("--checkpoint-every", type=int, default=1,
+                        help="Save every N epochs and always at the final epoch.")
+    parser.add_argument("--progress", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--progress-json", action="store_true",
+                        help="Emit notebook progress events instead of terminal bars.")
     parser.add_argument(
         "--resume-from", type=Path, default=None,
         help="Resume from a matching last.pt checkpoint; best.pt is not used.",
@@ -207,6 +231,8 @@ def main() -> None:
 
     if min(args.epochs, args.batch_size, args.image_size) <= 0:
         raise SystemExit("epochs, batch-size and image-size must be positive")
+    if args.checkpoint_every <= 0:
+        raise SystemExit("checkpoint-every must be positive")
     if args.num_workers < 0:
         raise SystemExit("num-workers must be non-negative")
     if any(not math.isfinite(value) or value <= 0 for value in (args.lr, args.backbone_lr)):
@@ -456,6 +482,7 @@ def main() -> None:
     def checkpoint_payload(epoch: int, val_stats: dict | None) -> dict:
         return {
             "checkpoint_kind": "last",
+            "checkpoint_every": args.checkpoint_every,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "architecture": args.architecture,
@@ -493,39 +520,51 @@ def main() -> None:
             "torch_version": str(torch.__version__),
         }
 
-    for epoch in range(start_epoch, args.epochs + 1):
-        train_stats = run_epoch(
-            model=model,
-            loader=train_loader,
-            device=device,
-            class_names=classes,
-            optimizer=optimizer,
-            criterion=criterion,
-        )
-        val_stats = None
-        if validation_available:
-            val_stats = run_epoch(
+    progress = TrainingProgress(fold=args.fold_id, epochs=args.epochs,
+                                start_epoch=start_epoch, json_output=args.progress_json,
+                                enabled=args.progress)
+    try:
+        for epoch in range(start_epoch, args.epochs + 1):
+            progress.start(epoch)
+            train_stats = run_epoch(
                 model=model,
-                loader=val_loader,
+                loader=train_loader,
                 device=device,
                 class_names=classes,
+                optimizer=optimizer,
                 criterion=criterion,
+                on_batch=lambda done, total, loss: progress.batch("Training", done, total, loss),
             )
+            val_stats = None
+            if validation_available:
+                val_stats = run_epoch(
+                    model=model,
+                    loader=val_loader,
+                    device=device,
+                    class_names=classes,
+                    criterion=criterion,
+                    on_batch=lambda done, total, loss: progress.batch("Validation", done, total, loss),
+                )
 
-        history.append({"epoch": epoch, "train": train_stats, "val": val_stats})
-        val_log = " | val=unavailable"
-        if val_stats is not None:
-            val_log = (
-                f" | val_loss={val_stats['loss']:.4f}"
-                f" val_macroF1_all={val_stats['macro_f1_all_classes']:.3f}"
-                f" val_macroF1_present={val_stats['macro_f1_present_classes']}"
+            history.append({"epoch": epoch, "train": train_stats, "val": val_stats})
+            val_log = " | val=unavailable"
+            if val_stats is not None:
+                val_log = (
+                    f" | val_loss={val_stats['loss']:.4f}"
+                    f" val_macroF1_all={val_stats['macro_f1_all_classes']:.3f}"
+                    f" val_macroF1_present={val_stats['macro_f1_present_classes']}"
+                )
+            print(
+                f"Epoch {epoch:03d}/{args.epochs} | train_loss={train_stats['loss']:.4f} "
+                f"train_macroF1_all={train_stats['macro_f1_all_classes']:.3f}{val_log}"
             )
-        print(
-            f"Epoch {epoch:03d}/{args.epochs} | train_loss={train_stats['loss']:.4f} "
-            f"train_macroF1_all={train_stats['macro_f1_all_classes']:.3f}{val_log}"
-        )
-        _save_checkpoint(last_path, checkpoint_payload(epoch, val_stats))
+            if epoch % args.checkpoint_every == 0 or epoch == args.epochs:
+                progress.saving()
+                _save_checkpoint(last_path, checkpoint_payload(epoch, val_stats))
+            progress.complete(train_stats["loss"], val_stats["loss"] if val_stats is not None else None)
 
+    finally:
+        progress.close()
     write_history()
     export_final_validation(args.epochs)
     print(f"Saved final checkpoint: {last_path}")
