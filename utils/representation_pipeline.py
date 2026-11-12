@@ -1,7 +1,7 @@
-"""Shared Representation provenance checks, frozen feature extraction and inference.
+"""Frozen-feature provenance and the independent contrastive/KNN comparator.
 
-Feature caches are local to one invocation and one baseline/fold. No transform,
-backbone, KNN bank or RBF centre is fitted on validation/test images.
+The thesis-oriented DeepRBF lifecycle lives in ``utils.rbf_pipeline``.
+This module intentionally contains no RBF-head implementation.
 """
 from __future__ import annotations
 
@@ -17,21 +17,17 @@ from torch.utils.data import DataLoader
 from config import CLASS_NAMES, PreprocessingConfig
 from data.dataloader import SpiralDataset, build_eval_transform
 from model import build_model
-from model.rbf import CentreRBF, reject_distances
 from model.embedding import EmbeddingProjection
 from utils.io import sha256_file, write_json
 from utils.metric_learning import knn_predict
 from utils.metrics import classification_metrics
 
-# Legacy wire identifier is deliberately stable: renaming source files must
-# not invalidate existing state_dict checkpoints or their configuration hashes.
 FORMAT_VERSION = "b4-frozen-features-v1"
 FIDELITY_NOTE = (
-    "Proposed roadmap implementation: frozen fold-specific WideResNet; linear projection; "
-    "all-pair balanced contrastive loss or restricted learned-centre RBF margin loss. "
-    "The RBF head is CentreRBF, not the paper's class-specific affine/powered-norm head. "
-    "Triplet, OSM, GMML, automatic selection and research-cohort validation are not included. "
-    "Original thesis mining, modified RBF loss and stage schedule were not supplied."
+    "Independent metric-learning comparator: frozen fold-specific WideResNet50-2 "
+    "features, a linear projection, balanced all-pair contrastive loss and a "
+    "training-only KNN bank. The thesis-oriented RBF is implemented separately "
+    "by DeepRBF, DeepRBFLoss and utils.rbf_pipeline."
 )
 
 
@@ -48,9 +44,9 @@ def load_baseline(path: Path, manifest: Path, device: torch.device,
     path, manifest = Path(path), Path(manifest)
     checkpoint = torch.load(path, map_location="cpu", weights_only=True)
     if checkpoint.get("architecture") != "wide_resnet50_2":
-        raise ValueError("Representation requires a fold-specific WideResNet50-2 baseline checkpoint")
+        raise ValueError("Expected a fold-specific WideResNet50-2 baseline checkpoint")
     if checkpoint.get("label_source") != "consensus" or checkpoint.get("class_names") != list(CLASS_NAMES):
-        raise ValueError("Representation requires the three-class expert-label baseline, including Unknown")
+        raise ValueError("Expected the three-class expert-label baseline, including Unknown")
     if checkpoint.get("num_classes") != 3 or checkpoint.get("feature_dim") != 2048:
         raise ValueError("Baseline must expose 2048-D pooled features and three classes")
     saved_fold = checkpoint.get("fold_id")
@@ -65,10 +61,13 @@ def load_baseline(path: Path, manifest: Path, device: torch.device,
     config = PreprocessingConfig.from_dict(preprocessing.get("config"))
     if preprocessing.get("sha256") != config.fingerprint or checkpoint.get("image_size") != config.image_size:
         raise ValueError("Baseline preprocessing metadata is inconsistent")
-    if any(k.startswith("projection.") for k in checkpoint["model_state_dict"]):
+    if any(key.startswith("projection.") for key in checkpoint["model_state_dict"]):
         raise ValueError("Legacy joint-projection checkpoint is not a separated CV baseline")
-    model = build_model(architecture="wide_resnet50_2", num_classes=3, pretrained=False,
-                        freeze_policy=checkpoint.get("freeze_policy", "early"))
+
+    model = build_model(
+        architecture="wide_resnet50_2", num_classes=3, pretrained=False,
+        freeze_policy=checkpoint.get("freeze_policy", "early"),
+    )
     model.load_state_dict(checkpoint["model_state_dict"], strict=True)
     model.requires_grad_(False)
     model.to(device).eval()
@@ -76,8 +75,7 @@ def load_baseline(path: Path, manifest: Path, device: torch.device,
         "path": str(path.resolve()), "sha256": sha256_file(path),
         "fold_id": saved_fold, "fold_manifest_sha256": manifest_hash,
         "preprocessing": preprocessing, "image_size": config.image_size,
-        "baseline_loss": checkpoint.get("loss"),
-        "baseline_epoch": checkpoint.get("epoch"),
+        "baseline_loss": checkpoint.get("loss"), "baseline_epoch": checkpoint.get("epoch"),
         "architecture": "wide_resnet50_2", "feature_dim": 2048,
     }
     return model, source
@@ -99,7 +97,6 @@ def extract_features(model: torch.nn.Module, source: dict, *, manifest: Path,
         image_size=config.image_size, label_source="consensus",
         transform=build_eval_transform(config), allow_empty=split == "val",
     )
-    # Canonical ordering fixes KNN equal-distance neighbor order across runs.
     dataset.rows.sort(key=lambda row: row["drawing_id"])
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
     features, targets, clinical, rows = [], [], [], []
@@ -112,9 +109,10 @@ def extract_features(model: torch.nn.Module, source: dict, *, manifest: Path,
         targets.append(batch["label"].cpu())
         for i, name in enumerate(batch["clinical_label"]):
             clinical.append({"control": 0, "parkinson": 1}.get(name, -1))
-            rows.append({key: str(batch[key][i]) for key in (
-                "drawing_id", "participant_id", "image_name", "image_path", "clinical_label",
-            )})
+            rows.append({
+                key: str(batch[key][i])
+                for key in ("drawing_id", "participant_id", "image_name", "image_path", "clinical_label")
+            })
     return FeatureSet(
         torch.cat(features) if features else torch.empty(0, 2048),
         torch.cat(targets) if targets else torch.empty(0, dtype=torch.long),
@@ -123,17 +121,20 @@ def extract_features(model: torch.nn.Module, source: dict, *, manifest: Path,
 
 
 def build_stage(config: dict) -> torch.nn.Module:
-    kwargs = dict(input_dim=2048, embedding_dim=config["embedding_dim"], normalize=config["normalize"])
-    if config["branch"] == "metric":
-        return EmbeddingProjection(**kwargs)
-    if config["branch"] == "rbf":
-        return CentreRBF(distance=config["distance"], **kwargs)
-    raise ValueError("Unknown Representation branch")
+    if config.get("branch") != "metric":
+        raise ValueError("This module supports only metric/KNN; use DeepRBF for RBF")
+    return EmbeddingProjection(
+        input_dim=2048,
+        embedding_dim=config["embedding_dim"],
+        normalize=config["normalize"],
+    )
 
 
 def config_digest(config: dict, source: dict) -> str:
-    value = {"config": config, "baseline_sha256": source["sha256"],
-             "manifest_sha256": source["fold_manifest_sha256"], "format_version": FORMAT_VERSION}
+    value = {
+        "config": config, "baseline_sha256": source["sha256"],
+        "manifest_sha256": source["fold_manifest_sha256"], "format_version": FORMAT_VERSION,
+    }
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()[:12]
 
 
@@ -149,40 +150,48 @@ def load_stage(path: Path, manifest: Path, device: torch.device,
                ) -> tuple[torch.nn.Module, torch.nn.Module, dict]:
     checkpoint = torch.load(path, map_location="cpu", weights_only=True)
     if checkpoint.get("format_version") != FORMAT_VERSION:
-        raise ValueError("Unsupported Representation checkpoint format")
+        raise ValueError("Unsupported metric-learning checkpoint format")
     if checkpoint.get("class_names") != list(CLASS_NAMES):
-        raise ValueError("Representation checkpoint class mapping differs")
+        raise ValueError("Metric checkpoint class mapping differs")
+    if checkpoint.get("config", {}).get("branch") != "metric":
+        raise ValueError("This loader accepts only metric/KNN checkpoints; use the DeepRBF loader")
+
     source = checkpoint["source_baseline"]
     if sha256_file(manifest) != source["fold_manifest_sha256"]:
-        raise ValueError("Representation checkpoint/manifest hash mismatch")
+        raise ValueError("Metric checkpoint/manifest hash mismatch")
     baseline_path = Path(baseline_path or source["path"])
     if sha256_file(baseline_path) != source["sha256"]:
         raise ValueError("Source baseline checkpoint hash mismatch")
-    backbone, restored_source = load_baseline(baseline_path, manifest, device, fold_id=source["fold_id"])
+    backbone, restored_source = load_baseline(
+        baseline_path, manifest, device, fold_id=source["fold_id"]
+    )
     if restored_source["preprocessing"] != source["preprocessing"]:
-        raise ValueError("Representation/source baseline preprocessing mismatch")
+        raise ValueError("Metric/source baseline preprocessing mismatch")
     if checkpoint.get("config_digest") != config_digest(checkpoint["config"], source):
-        raise ValueError("Representation configuration digest mismatch")
-    # Verify bank membership from the exact manifest, not merely saved claims.
-    # This check opens no images, including validation/test images.
+        raise ValueError("Metric configuration digest mismatch")
+
     training = SpiralDataset(
-        manifest_path=manifest, root=root or Path.cwd(), fold_id=source["fold_id"], split="train",
-        image_size=source["image_size"], label_source="consensus", verify_files=False,
+        manifest_path=manifest, root=root or Path.cwd(), fold_id=source["fold_id"],
+        split="train", image_size=source["image_size"], label_source="consensus",
+        verify_files=False,
     )
     training.rows.sort(key=lambda row: row["drawing_id"])
     ids = [row["drawing_id"] for row in training.rows]
     participants = [row["participant_id"] for row in training.rows]
-    if checkpoint.get("training_drawing_ids") != ids or checkpoint.get("training_participant_ids") != sorted(set(participants)):
-        raise ValueError("Representation training membership differs from this fold's manifest")
-    if checkpoint["config"]["branch"] == "metric":
-        bank = checkpoint["training_bank"]
-        expected_targets = torch.tensor([CLASS_NAMES.index(row["expert_label"]) for row in training.rows])
-        if (bank["drawing_ids"] != ids or bank["participant_ids"] != participants
-                or not torch.equal(bank["targets"], expected_targets)):
-            raise ValueError("KNN bank is not the current fold's training-only bank")
-        if (bank["embeddings"].shape != (len(ids), checkpoint["config"]["embedding_dim"])
-                or not torch.isfinite(bank["embeddings"]).all()):
-            raise ValueError("Invalid KNN embedding bank")
+    if checkpoint.get("training_drawing_ids") != ids:
+        raise ValueError("Metric training drawing membership differs from the manifest")
+    if checkpoint.get("training_participant_ids") != sorted(set(participants)):
+        raise ValueError("Metric training participant membership differs from the manifest")
+
+    bank = checkpoint["training_bank"]
+    expected_targets = torch.tensor([CLASS_NAMES.index(row["expert_label"]) for row in training.rows])
+    if (bank["drawing_ids"] != ids or bank["participant_ids"] != participants
+            or not torch.equal(bank["targets"], expected_targets)):
+        raise ValueError("KNN bank is not the current fold's training-only bank")
+    if (bank["embeddings"].shape != (len(ids), checkpoint["config"]["embedding_dim"])
+            or not torch.isfinite(bank["embeddings"]).all()):
+        raise ValueError("Invalid KNN embedding bank")
+
     model = build_stage(checkpoint["config"]).to(device)
     model.load_state_dict(checkpoint["model_state_dict"], strict=True)
     model.eval()
@@ -197,34 +206,27 @@ def predict_stage(model: torch.nn.Module, data: FeatureSet, checkpoint: dict,
         return []
     training_participants = set(checkpoint["training_participant_ids"])
     if any(row["participant_id"] in training_participants for row in data.rows):
-        raise ValueError("Evaluation participant overlaps the Representation training bank")
-    config = checkpoint["config"]
+        raise ValueError("Evaluation participant overlaps the metric training bank")
+    if checkpoint["config"].get("branch") != "metric":
+        raise ValueError("DeepRBF predictions must use utils.rbf_pipeline")
     model.eval()
-    x = data.features.to(device)
-    output = []
-    if config["branch"] == "metric":
-        bank = checkpoint["training_bank"]
-        predicted, scores = knn_predict(
-            model(x), bank["embeddings"].to(device), bank["targets"].to(device),
-            k=config["knn_k"], distance=config["distance"], weighting=config["knn_weighting"],
-        )
-        for i, row in enumerate(data.rows):
-            output.append({**row, "true_label": CLASS_NAMES[int(data.targets[i])],
-                           "predicted_label": CLASS_NAMES[int(predicted[i])],
-                           "decision_reason": "knn_unknown_or_tie" if predicted[i] == 2 else "knn_vote",
-                           **{f"vote_{name}": float(scores[i, j]) for j, name in enumerate(CLASS_NAMES)}})
-    else:
-        distances = model(x)
-        predicted, reasons = reject_distances(
-            distances, distance_threshold=config["distance_threshold"], gap_threshold=config["gap_threshold"],
-        )
-        for i, row in enumerate(data.rows):
-            output.append({**row, "true_label": CLASS_NAMES[int(data.targets[i])],
-                           "predicted_label": CLASS_NAMES[int(predicted[i])],
-                           "decision_reason": reasons[i],
-                           "distance_control": float(distances[i, 0]),
-                           "distance_parkinson": float(distances[i, 1])})
-    return output
+    bank = checkpoint["training_bank"]
+    predicted, scores = knn_predict(
+        model(data.features.to(device)), bank["embeddings"].to(device),
+        bank["targets"].to(device), k=checkpoint["config"]["knn_k"],
+        distance=checkpoint["config"]["distance"],
+        weighting=checkpoint["config"]["knn_weighting"],
+    )
+    return [
+        {
+            **row,
+            "true_label": CLASS_NAMES[int(data.targets[i])],
+            "predicted_label": CLASS_NAMES[int(predicted[i])],
+            "decision_reason": "knn_unknown_or_tie" if predicted[i] == 2 else "knn_vote",
+            **{f"vote_{name}": float(scores[i, j]) for j, name in enumerate(CLASS_NAMES)},
+        }
+        for i, row in enumerate(data.rows)
+    ]
 
 
 def prediction_metrics(rows: list[dict]) -> dict | None:
@@ -240,11 +242,13 @@ def prediction_metrics(rows: list[dict]) -> dict | None:
         "accepted_samples": len(accepted), "rejected_samples": len(rows) - len(accepted),
         "coverage": len(accepted) / len(rows),
         "rejection_rate": 1 - len(accepted) / len(rows),
-        "accepted_accuracy": sum(true[i] == pred[i] for i in accepted) / len(accepted) if accepted else None,
-        "pd_recall_all_cases": sum(t == p == 1 for t, p in zip(true, pred)) / n_pd if n_pd else None,
+        "accepted_accuracy": (
+            sum(true[i] == pred[i] for i in accepted) / len(accepted) if accepted else None
+        ),
+        "pd_recall_all_cases": (
+            sum(t == p == 1 for t, p in zip(true, pred)) / n_pd if n_pd else None
+        ),
     })
-    # Preserve explicit undefined denominators in Representation reports rather than
-    # representing absent predictions/classes as perfect or zero performance.
     for value in result["per_class"].values():
         if value["predicted"] == 0:
             value["precision"] = None
@@ -260,14 +264,16 @@ def write_predictions(output_dir: Path, rows: list[dict], checkpoint: dict, *, s
     config = checkpoint["config"]
     common = {
         "fold_id": checkpoint["source_baseline"]["fold_id"], "split": split,
-        "stage": config["branch"], "epoch": checkpoint["epoch"],
+        "stage": "metric", "epoch": checkpoint["epoch"],
         "manifest_sha256": checkpoint["source_baseline"]["fold_manifest_sha256"],
         "baseline_sha256": checkpoint["source_baseline"]["sha256"],
         "config_digest": checkpoint["config_digest"],
         "stage_checkpoint_sha256": checkpoint["stage_checkpoint_sha256"],
     }
     records = [{**common, **row} for row in rows]
-    fields = list(records[0]) if records else [*common, "drawing_id", "participant_id", "true_label", "predicted_label"]
+    fields = list(records[0]) if records else [
+        *common, "drawing_id", "participant_id", "true_label", "predicted_label"
+    ]
     with (output_dir / f"{split}_predictions.csv").open("w", encoding="utf-8-sig", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader()
@@ -277,8 +283,9 @@ def write_predictions(output_dir: Path, rows: list[dict], checkpoint: dict, *, s
         "metrics": prediction_metrics(rows), "config": config,
         "source_baseline": checkpoint["source_baseline"],
         "training_diagnostics": checkpoint["training_diagnostics"],
-        "selection_policy": "fixed_epoch_budget_final_checkpoint; parameters supplied from development protocol",
-        "test_partition_loaded_or_evaluated": split == "test", "fidelity_note": FIDELITY_NOTE,
+        "selection_policy": "fixed_epoch_budget_final_checkpoint",
+        "test_partition_loaded_or_evaluated": split == "test",
+        "fidelity_note": FIDELITY_NOTE,
     }
     write_json(output_dir / f"{split}_report.json", report)
     return report
