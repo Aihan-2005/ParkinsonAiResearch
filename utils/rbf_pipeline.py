@@ -125,7 +125,6 @@ def predict_image_rows(features, distances: torch.Tensor, decision: dict) -> lis
         distances,
         distance_threshold=float(decision["distance_threshold"]),
         gap_threshold=float(decision["gap_threshold"]),
-        gap_scope="both_inside",
     )
     rows = []
     for i, row in enumerate(features.rows):

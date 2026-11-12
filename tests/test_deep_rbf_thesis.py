@@ -76,14 +76,14 @@ def test_thesis_rejection_gap_only_applies_when_both_distances_inside_radius():
     # .7 and .72 are both inside and close: reject as ambiguous.
     # 1.2 and 1.3 are both outside: reject as far.
     d = torch.tensor([[.99, 1.01], [.70, .72], [1.2, 1.3], [.5, .5]])
-    pred, reasons = reject_distances(d, distance_threshold=1.0, gap_threshold=.05, gap_scope="both_inside")
+    pred, reasons = reject_distances(d, distance_threshold=1.0, gap_threshold=.05)
     assert pred.tolist() == [0, 2, 2, 2]
     assert reasons == ["accepted", "ambiguous_distance_gap", "far_from_known_classes", "equal_distance_tie"]
 
 
 def test_thesis_rejection_uses_strict_boundaries_and_tie_safety():
     d = torch.tensor([[1.0, .95], [1.0, 1.0], [.8, .9]])
-    pred, reasons = reject_distances(d, distance_threshold=1.0, gap_threshold=.1, gap_scope="both_inside")
+    pred, reasons = reject_distances(d, distance_threshold=1.0, gap_threshold=.1)
     assert pred.tolist() == [1, 2, 2]
     assert reasons == ["accepted", "equal_distance_tie", "ambiguous_distance_gap"]
 
@@ -158,9 +158,8 @@ def test_participant_prediction_is_independent_of_clinical_reference():
     assert first == second == "unknown"
 
 
-def test_legacy_centre_rbf_gap_rule_remains_global_by_default():
+def test_deep_rbf_accepts_radius_straddling_distances_without_legacy_options():
     d = torch.tensor([[.99, 1.01]])
-    legacy = reject_distances(d, distance_threshold=1.0, gap_threshold=.05)[0]
-    thesis = reject_distances(d, distance_threshold=1.0, gap_threshold=.05, gap_scope="both_inside")[0]
-    assert legacy.item() == 2
-    assert thesis.item() == 0
+    prediction, reasons = reject_distances(d, distance_threshold=1.0, gap_threshold=.05)
+    assert prediction.item() == 0
+    assert reasons == ["accepted"]

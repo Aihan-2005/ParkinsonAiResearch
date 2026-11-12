@@ -154,7 +154,6 @@ def threshold_grid_search(
                 distances,
                 distance_threshold=radius,
                 gap_threshold=gap,
-                gap_scope="both_inside",
             )
             image_metrics = clinical_image_metrics(clinical_targets, pred)
             participant_metrics = None
