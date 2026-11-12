@@ -1,8 +1,4 @@
-"""Train DeepRBF heads for a range of existing WideResNet/Focal baseline folds.
-
-This script does not train WideResNet. It validates and selects one matching
-baseline checkpoint per fold, then delegates training to train_deep_rbf.py.
-"""
+"""Train DeepRBF heads for a range of existing WideResNet/Focal baseline folds."""
 from __future__ import annotations
 
 import argparse
@@ -21,11 +17,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baseline-glob", default="*_last.pt")
     parser.add_argument("--manifest", type=Path, default=DATA.fold_manifest_path)
     parser.add_argument("--root", type=Path, default=ROOT_DIR)
-    parser.add_argument(
-        "--output-root",
-        type=Path,
-        default=ROOT_DIR / "outputs" / "deep_rbf",
-    )
+    parser.add_argument("--output-root", type=Path, default=ROOT_DIR / "outputs" / "deep_rbf")
     parser.add_argument("--fold-start", type=int, default=1)
     parser.add_argument("--fold-end", type=int, default=25)
     parser.add_argument("--epochs", type=int, default=30)
@@ -35,10 +27,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--known-margin", type=float, default=1.0)
     parser.add_argument("--reject-margin", type=float, default=1.0)
     parser.add_argument("--beta", type=float, default=1.0)
+    parser.add_argument("--balance-groups", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
-        "--balance-groups",
-        action=argparse.BooleanOptionalAction,
-        default=True,
+        "--allow-missing-groups",
+        action="store_true",
+        help="Explicitly mark folds with missing groups as ablation runs.",
     )
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=0.0)
@@ -46,11 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--feature-batch-size", type=int, default=8)
     parser.add_argument("--allow-non-focal-baseline", action="store_true")
-    parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="Resume folds with an existing last.pt; start missing folds fresh.",
-    )
+    parser.add_argument("--resume", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -71,13 +60,9 @@ def main() -> None:
     script = Path(__file__).with_name("train_deep_rbf.py")
 
     for fold, baseline in baselines.items():
-        output_dir = (
-            args.output_root
-            / f"fold{fold:02d}_{args.distance}_{args.distance_power}"
-        )
+        output_dir = args.output_root / f"fold{fold:02d}_{args.distance}_{args.distance_power}"
         command = [
-            sys.executable,
-            str(script),
+            sys.executable, str(script),
             "--baseline-checkpoint", str(baseline),
             "--fold-id", str(fold),
             "--manifest", str(args.manifest),
@@ -96,9 +81,9 @@ def main() -> None:
             "--device", args.device,
             "--feature-batch-size", str(args.feature_batch_size),
         ]
-        command.append(
-            "--balance-groups" if args.balance_groups else "--no-balance-groups"
-        )
+        command.append("--balance-groups" if args.balance_groups else "--no-balance-groups")
+        if args.allow_missing_groups:
+            command.append("--allow-missing-groups")
         if args.allow_non_focal_baseline:
             command.append("--allow-non-focal-baseline")
         if args.resume and (output_dir / "last.pt").is_file():
@@ -108,7 +93,6 @@ def main() -> None:
         print(shlex.join(command))
         if args.dry_run:
             continue
-
         completed = subprocess.run(command, check=False)
         if completed.returncode != 0:
             raise SystemExit(

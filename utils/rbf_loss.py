@@ -1,21 +1,51 @@
-"""Margin objective for the thesis-oriented class-specific Deep-RBF head."""
+"""Margin objective and strict four-group checks for thesis-oriented DeepRBF."""
 from __future__ import annotations
 
 import math
+
 import torch
 from torch import nn
 
 
+FOUR_GROUP_NAMES = (
+    "known_control",
+    "known_parkinson",
+    "rejected_clinical_control",
+    "rejected_clinical_parkinson",
+)
+
+
+def deep_rbf_group_counts(targets: torch.Tensor, clinical_targets: torch.Tensor) -> dict[str, int]:
+    """Count the four groups used by the Deep-RBF objective."""
+    if targets.ndim != 1 or clinical_targets.shape != targets.shape:
+        raise ValueError("Expected one expert and one clinical label per sample")
+    if targets.dtype != torch.long or clinical_targets.dtype != torch.long:
+        raise ValueError("Labels must use torch.int64")
+    if bool(((targets < 0) | (targets > 2)).any()):
+        raise ValueError("Expert labels must use Control=0, Parkinson=1, Unknown=2")
+    if bool(((clinical_targets < -1) | (clinical_targets > 1)).any()):
+        raise ValueError("Clinical labels must use Unknown=-1, Control=0, Parkinson=1")
+    unknown = targets == 2
+    invalid_origin = ((clinical_targets < 0) | (clinical_targets > 1)) & unknown
+    if bool(invalid_origin.any()):
+        raise ValueError("Every expert-Unknown training sample needs a valid clinical origin")
+    return {
+        "known_control": int((targets == 0).sum().item()),
+        "known_parkinson": int((targets == 1).sum().item()),
+        "rejected_clinical_control": int((unknown & (clinical_targets == 0)).sum().item()),
+        "rejected_clinical_parkinson": int((unknown & (clinical_targets == 1)).sum().item()),
+    }
+
+
 class DeepRBFLoss(nn.Module):
-    """Known-class and rejected-origin margin objective.
+    """Known/rejected margin objective.
 
-    Known: d_y + sum_{j != y} relu(alpha - d_j).
-    Unknown: sum_j relu(lambda - d_j).
+    Known example: d_y + sum_{j != y} relu(alpha - d_j).
+    Expert-Unknown example: sum_j relu(lambda - d_j).
 
-    With group balancing, means are taken separately for known Control,
-    known Parkinson, Unknown/clinical-Control and Unknown/clinical-Parkinson,
-    then nonempty group means are averaged. This is loss-level balancing,
-    not literal image oversampling.
+    ``require_all_groups=True`` is used by the thesis training entry point.
+    The permissive default is retained for small isolated loss experiments and
+    explicit ablations; it must not be used silently in a thesis training run.
     """
 
     def __init__(
@@ -24,6 +54,7 @@ class DeepRBFLoss(nn.Module):
         reject_margin: float = 1.0,
         beta: float = 1.0,
         balance_groups: bool = True,
+        require_all_groups: bool = False,
     ) -> None:
         super().__init__()
         if any(not math.isfinite(float(v)) or float(v) <= 0
@@ -35,6 +66,7 @@ class DeepRBFLoss(nn.Module):
         self.reject_margin = float(reject_margin)
         self.beta = float(beta)
         self.balance_groups = bool(balance_groups)
+        self.require_all_groups = bool(require_all_groups)
 
     @staticmethod
     def _mean_of_nonempty_groups(values, masks, zero):
@@ -43,11 +75,19 @@ class DeepRBFLoss(nn.Module):
 
     def forward(self, distances, targets, clinical_targets):
         _validate_inputs(distances, targets, clinical_targets)
-        unknown = targets == 2
-        invalid_origin = ((clinical_targets < 0) | (clinical_targets > 1)) & unknown
-        if bool(invalid_origin.any()):
-            raise ValueError("Every expert-Unknown training sample needs a valid clinical origin")
+        if len(distances) == 0:
+            raise ValueError("DeepRBF loss cannot be computed on an empty training batch")
 
+        group_counts = deep_rbf_group_counts(targets, clinical_targets)
+        missing = [name for name in FOUR_GROUP_NAMES if group_counts[name] == 0]
+        if self.require_all_groups and missing:
+            raise ValueError(
+                "DeepRBF training requires all four thesis groups in the training fold. "
+                f"Missing groups: {missing}; observed counts: {group_counts}. "
+                "Check the fold manifest/labels. Do not silently continue with a changed objective."
+            )
+
+        unknown = targets == 2
         zero = distances.sum() * 0.0
         known_mask = targets < 2
         known_values = distances.new_zeros(len(distances))
@@ -89,3 +129,5 @@ def _validate_inputs(distances, targets, clinical_targets):
         raise ValueError("Labels must use torch.int64")
     if bool(((targets < 0) | (targets > 2)).any()):
         raise ValueError("Expert labels must use Control=0, Parkinson=1, Unknown=2")
+    if bool(((clinical_targets < -1) | (clinical_targets > 1)).any()):
+        raise ValueError("Clinical labels must use Unknown=-1, Control=0, Parkinson=1")

@@ -1,7 +1,9 @@
 """Train the class-specific affine Deep-RBF branch on one development fold.
 
-This is a separate thesis-oriented path. The older
-train_representation.py --branch rbf remains the CentreRBF comparator.
+The default thesis-oriented run requires all four training groups:
+known Control, known Parkinson, expert-Unknown/clinical-Control and
+expert-Unknown/clinical-Parkinson. Missing groups stop training unless the
+user explicitly selects the ablation flag --allow-missing-groups.
 """
 from __future__ import annotations
 
@@ -18,9 +20,12 @@ from utils.io import sha256_file
 from utils.loops import select_device
 from utils.representation_pipeline import atomic_checkpoint, extract_features, load_baseline
 from utils.reproducibility import seed_everything
-from utils.rbf_loss import DeepRBFLoss
+from utils.rbf_loss import DeepRBFLoss, FOUR_GROUP_NAMES, deep_rbf_group_counts
 from utils.rbf_pipeline import (
-    DEEP_RBF_FIDELITY_NOTE, DEEP_RBF_FORMAT_VERSION, assert_no_participant_overlap, write_distance_table,
+    DEEP_RBF_FIDELITY_NOTE,
+    DEEP_RBF_FORMAT_VERSION,
+    assert_no_participant_overlap,
+    write_distance_table,
 )
 
 
@@ -41,7 +46,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reject-margin", type=float, default=1.0, help="Lambda in the rejected-sample loss.")
     parser.add_argument("--beta", type=float, default=1.0, help="Relative weight of rejected examples; tune on development data.")
     parser.add_argument("--balance-groups", action=argparse.BooleanOptionalAction, default=True,
-                        help="Equalize the two known groups and the two rejected-origin groups by group means.")
+                        help="Equalize known Control/Parkinson and rejected-origin groups by group means.")
+    parser.add_argument(
+        "--allow-missing-groups",
+        action="store_true",
+        help="Explicitly run a non-thesis ablation if one or more of the four training groups is absent.",
+    )
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=42)
@@ -80,11 +90,30 @@ def _restore_rng(payload: dict) -> None:
         torch.cuda.set_rng_state_all(payload["torch_cuda_rng_state_all"])
 
 
+def _resume_config_is_compatible(checkpoint: dict, config: dict, *, allow_missing_groups: bool) -> bool:
+    saved_config = checkpoint.get("config")
+    if saved_config == config:
+        return True
+
+    # Old checkpoints did not record the strict-four-group policy. They are
+    # resumable only when the saved diagnostics prove all four groups existed,
+    # unless the caller explicitly requests the missing-group ablation.
+    legacy_config = {key: value for key, value in config.items() if key != "require_all_four_groups"}
+    saved_diagnostics = checkpoint.get("training_diagnostics", {})
+    if saved_config != legacy_config:
+        return False
+    if allow_missing_groups:
+        return True
+    return saved_diagnostics.get("missing_groups") == []
+
+
 def main() -> None:
     args = parse_args()
     seed_everything(args.seed)
     device = select_device(args.device)
-    backbone, source = load_baseline(args.baseline_checkpoint, args.manifest, device, fold_id=args.fold_id)
+    backbone, source = load_baseline(
+        args.baseline_checkpoint, args.manifest, device, fold_id=args.fold_id
+    )
     baseline_loss = source.get("baseline_loss")
     baseline_is_focal = isinstance(baseline_loss, dict) and baseline_loss.get("name") == "focal"
     if not baseline_is_focal and not args.allow_non_focal_baseline:
@@ -92,10 +121,15 @@ def main() -> None:
             "The thesis specifies a Focal-trained WideResNet. The source checkpoint does not identify "
             "Focal Loss; pass --allow-non-focal-baseline only for an explicitly labelled ablation."
         )
-    train = extract_features(backbone, source, manifest=args.manifest, root=args.root,
-                             split="train", device=device, batch_size=args.feature_batch_size)
-    validation = extract_features(backbone, source, manifest=args.manifest, root=args.root,
-                                  split="val", device=device, batch_size=args.feature_batch_size)
+
+    train = extract_features(
+        backbone, source, manifest=args.manifest, root=args.root,
+        split="train", device=device, batch_size=args.feature_batch_size,
+    )
+    validation = extract_features(
+        backbone, source, manifest=args.manifest, root=args.root,
+        split="val", device=device, batch_size=args.feature_batch_size,
+    )
     del backbone
 
     x = train.features.to(device)
@@ -103,8 +137,17 @@ def main() -> None:
     clinical = train.clinical_targets.to(device)
     if not ((y == 0).any() and (y == 1).any()):
         raise ValueError("DeepRBF training requires expert-known Control and Parkinson examples in this fold")
-    if (((clinical < 0) | (clinical > 1)) & (y == 2)).any():
-        raise ValueError("Every expert-Unknown training sample needs a recorded clinical origin")
+
+    group_counts = deep_rbf_group_counts(y, clinical)
+    missing_groups = [name for name in FOUR_GROUP_NAMES if group_counts[name] == 0]
+    if missing_groups and not args.allow_missing_groups:
+        raise ValueError(
+            f"Fold {args.fold_id} is missing required DeepRBF training groups: {missing_groups}. "
+            f"Observed four-group counts: {group_counts}. "
+            "Inspect the current fold manifest and expert/clinical labels before training. "
+            "Do not silently train with a changed objective. "
+            "Use --allow-missing-groups only for a clearly labelled ablation."
+        )
 
     config = {
         "head": "class_specific_affine_deep_rbf",
@@ -116,6 +159,7 @@ def main() -> None:
         "reject_margin": args.reject_margin,
         "beta": args.beta,
         "balance_groups": args.balance_groups,
+        "require_all_four_groups": not args.allow_missing_groups,
         "lr": args.lr,
         "weight_decay": args.weight_decay,
         "seed": args.seed,
@@ -125,19 +169,24 @@ def main() -> None:
     }
     training_ids = [row["drawing_id"] for row in train.rows]
     participant_ids = [row["participant_id"] for row in train.rows]
-    assert_no_participant_overlap(validation, {"training_participant_ids": sorted(set(participant_ids))})
-    group_counts = {
-        "known_control": int((y == 0).sum()),
-        "known_parkinson": int((y == 1).sum()),
-        "rejected_clinical_control": int(((y == 2) & (clinical == 0)).sum()),
-        "rejected_clinical_parkinson": int(((y == 2) & (clinical == 1)).sum()),
-    }
+    assert_no_participant_overlap(
+        validation, {"training_participant_ids": sorted(set(participant_ids))}
+    )
+
     diagnostics = {
         "training_images": len(train.rows),
         "training_participants": len(set(participant_ids)),
-        "expert_label_counts": {name: int((y == i).sum()) for i, name in enumerate(("control", "parkinson", "unknown"))},
+        "expert_label_counts": {
+            name: int((y == index).sum())
+            for index, name in enumerate(("control", "parkinson", "unknown"))
+        },
         "four_group_counts": group_counts,
-        "missing_groups": [name for name, count in group_counts.items() if count == 0],
+        "missing_groups": missing_groups,
+        "group_protocol": (
+            "strict_four_group_training"
+            if not args.allow_missing_groups
+            else "explicit_missing_group_ablation"
+        ),
         "baseline_loss": source.get("baseline_loss"),
         "baseline_epoch": source.get("baseline_epoch"),
         "feature_extraction_device": str(device),
@@ -149,8 +198,15 @@ def main() -> None:
             "The thesis specifies a Focal-trained WideResNet. This baseline metadata does not identify focal loss. "
             "Treat this run as an ablation unless the checkpoint's training provenance confirms focal loss."
         )
+    if missing_groups:
+        diagnostics["missing_group_warning"] = (
+            "At least one of the four thesis groups is absent. This run is an explicit ablation, "
+            "not a full four-group thesis-oriented training run."
+        )
 
-    output_dir = args.output_dir or ROOT_DIR / "outputs" / "deep_rbf" / f"fold{args.fold_id:02d}_{args.distance}_{args.distance_power}"
+    output_dir = args.output_dir or (
+        ROOT_DIR / "outputs" / "deep_rbf" / f"fold{args.fold_id:02d}_{args.distance}_{args.distance_power}"
+    )
     last_path = output_dir / "last.pt"
     if args.resume and not last_path.is_file():
         raise ValueError(f"Resume checkpoint does not exist: {last_path}")
@@ -158,19 +214,35 @@ def main() -> None:
         raise ValueError("Output directory is nonempty; use --resume or choose a new directory")
 
     model = DeepRBF(2048, args.rbf_dim, args.distance, args.distance_power).to(device)
-    criterion = DeepRBFLoss(args.known_margin, args.reject_margin, args.beta, args.balance_groups)
+    criterion = DeepRBFLoss(
+        args.known_margin,
+        args.reject_margin,
+        args.beta,
+        args.balance_groups,
+        require_all_groups=not args.allow_missing_groups,
+    )
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     history: list[dict] = []
     start_epoch = 1
     if args.resume:
         checkpoint = torch.load(last_path, map_location="cpu", weights_only=True)
-        if (checkpoint.get("format_version") != DEEP_RBF_FORMAT_VERSION
-                or checkpoint.get("config") != config
-                or checkpoint.get("source_baseline", {}).get("sha256") != source["sha256"]
-                or checkpoint.get("source_baseline", {}).get("fold_manifest_sha256") != source["fold_manifest_sha256"]):
-            raise ValueError("Resume config, source baseline or manifest differs")
+        if (
+            checkpoint.get("format_version") != DEEP_RBF_FORMAT_VERSION
+            or not _resume_config_is_compatible(
+                checkpoint, config, allow_missing_groups=args.allow_missing_groups
+            )
+            or checkpoint.get("source_baseline", {}).get("sha256") != source["sha256"]
+            or checkpoint.get("source_baseline", {}).get("fold_manifest_sha256") != source["fold_manifest_sha256"]
+        ):
+            raise ValueError(
+                "Resume config, strict-group policy, source baseline or manifest differs. "
+                "Use a fresh output directory if the previous run omitted required groups."
+            )
         if checkpoint.get("training_drawing_ids") != training_ids:
             raise ValueError("Resume training membership differs")
+        saved_counts = checkpoint.get("training_diagnostics", {}).get("four_group_counts")
+        if saved_counts is not None and saved_counts != group_counts:
+            raise ValueError("Resume four-group counts differ from the current training fold")
         model.load_state_dict(checkpoint["model_state_dict"], strict=True)
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         history = checkpoint["history"]
@@ -188,7 +260,7 @@ def main() -> None:
             "class_names": ["control", "parkinson", "unknown"],
             "epoch": epoch,
             "epochs_requested": args.epochs,
-            "model_state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
+            "model_state_dict": {key: value.detach().cpu() for key, value in model.state_dict().items()},
             "optimizer_state_dict": optimizer.state_dict(),
             "rng_state": _rng_payload(),
             "history": history,
@@ -198,7 +270,10 @@ def main() -> None:
             "fidelity_note": DEEP_RBF_FIDELITY_NOTE,
         }
 
-    print(f"DeepRBF | fold={args.fold_id} | train={len(train.rows)} val={len(validation.rows)} | {device}")
+    print(
+        f"DeepRBF | fold={args.fold_id} | train={len(train.rows)} "
+        f"val={len(validation.rows)} | {device}"
+    )
     print(json.dumps(diagnostics, sort_keys=True))
     for epoch in range(start_epoch, args.epochs + 1):
         model.train()
@@ -208,10 +283,13 @@ def main() -> None:
         if not torch.isfinite(loss):
             raise ValueError("Nonfinite DeepRBF loss")
         loss.backward()
-        if any(p.grad is not None and not torch.isfinite(p.grad).all() for p in model.parameters()):
+        if any(
+            parameter.grad is not None and not torch.isfinite(parameter.grad).all()
+            for parameter in model.parameters()
+        ):
             raise ValueError("Nonfinite DeepRBF gradient")
         optimizer.step()
-        if any(not torch.isfinite(p).all() for p in model.parameters()):
+        if any(not torch.isfinite(parameter).all() for parameter in model.parameters()):
             raise ValueError("Nonfinite DeepRBF parameter after optimizer step")
         history.append({"epoch": epoch, "training_loss_before_update": float(loss.detach())})
         atomic_checkpoint(last_path, payload(epoch))
@@ -224,7 +302,7 @@ def main() -> None:
         val_distances = model(validation.features.to(device)).cpu()
     write_distance_table(output_dir, validation, val_distances, checkpoint, "val")
     print(f"DeepRBF checkpoint: {last_path}")
-    print("Validation distances exported; tune rejection thresholds on validation only with tune_rbf_thresholds.py.")
+    print("Validation distances exported; tune rejection thresholds on validation only with tune_deep_rbf_thresholds_all_folds.py.")
     print("Held-out test was not loaded or evaluated.")
 
 

@@ -1,9 +1,9 @@
-"""Select fold-local DeepRBF rejection rules with a pooled development OOF fallback.
+"""Select fold-local DeepRBF thresholds with a pooled development OOF fallback.
 
-Each fold-specific model predicts only its own held-out validation participants.
-Fold 22 is allowed to contribute an empty validation set; its model receives the
-same pooled development threshold selected from the other nonempty folds.
-No test images are loaded by this script.
+Fold-local thresholds are selected only when that fold's validation split
+contains both clinical classes. Otherwise the pooled out-of-fold development
+threshold is used. Validation metrics in this file are threshold-selection
+metrics, not unbiased estimates of final performance. No test images are loaded.
 """
 from __future__ import annotations
 
@@ -22,6 +22,11 @@ from utils.rbf_thresholds import quantile_threshold_grid, threshold_grid_search
 from utils.representation_pipeline import extract_features
 
 
+THRESHOLD_SELECTION_ROLE = (
+    "development_validation_for_threshold_selection_only_not_an_unbiased_performance_estimate"
+)
+
+
 def _parse_grid(value: str | None) -> list[float] | None:
     if value is None:
         return None
@@ -32,6 +37,11 @@ def _parse_grid(value: str | None) -> list[float] | None:
     if not result:
         raise argparse.ArgumentTypeError("Grid cannot be empty")
     return result
+
+
+def _has_both_clinical_classes(targets: torch.Tensor) -> bool:
+    """A fold-local threshold cannot be calibrated on a single-class reference set."""
+    return bool((targets == 0).any() and (targets == 1).any())
 
 
 def _find_baselines(args: argparse.Namespace) -> dict[int, Path]:
@@ -64,7 +74,7 @@ def _find_baselines(args: argparse.Namespace) -> dict[int, Path]:
     if duplicates:
         raise ValueError(
             "More than one matching baseline checkpoint per fold; narrow --baseline-glob: "
-            + json.dumps({k: [str(p) for p in v] for k, v in duplicates.items()})
+            + json.dumps({key: [str(path) for path in value] for key, value in duplicates.items()})
         )
     return {fold: paths[0] for fold, paths in found.items()}
 
@@ -117,9 +127,7 @@ def main() -> None:
     seen_drawing_ids: set[str] = set()
 
     for fold in range(args.fold_start, args.fold_end + 1):
-        model_dir = args.deep_rbf_root / (
-            f"fold{fold:02d}_{args.distance}_{args.distance_power}"
-        )
+        model_dir = args.deep_rbf_root / f"fold{fold:02d}_{args.distance}_{args.distance_power}"
         checkpoint_path = model_dir / "last.pt"
         if not checkpoint_path.is_file():
             raise FileNotFoundError(f"DeepRBF checkpoint missing for fold {fold}: {checkpoint_path}")
@@ -137,9 +145,7 @@ def main() -> None:
         if common_config is None:
             common_config = dict(config)
         elif config != common_config:
-            raise ValueError(
-                "Fold-specific DeepRBF training configurations differ; do not pool them"
-            )
+            raise ValueError("Fold-specific DeepRBF training configurations differ; do not pool them")
 
         validation = extract_features(
             backbone, checkpoint["source_baseline"],
@@ -187,17 +193,18 @@ def main() -> None:
                 "drawing_ids": [],
             }
         print(f"Fold {fold:02d}: validation images={len(validation.rows)}")
-
         del backbone, head, validation
 
     if not all_distances:
         raise ValueError("No nonempty validation folds were found; thresholds cannot be selected")
-    # Multiple drawings per participant are expected within one validation fold.
-    # Only cross-fold participant overlap is forbidden; it is checked while rows
-    # are collected above. Drawing IDs must be globally unique across OOF rows.
 
     distances = torch.cat(all_distances)
     clinical_targets = torch.cat(all_clinical)
+    if not _has_both_clinical_classes(clinical_targets):
+        raise ValueError(
+            "Pooled out-of-fold development validation must contain both clinical "
+            "Control and Parkinson references before threshold selection."
+        )
     if distance_grid is None or gap_grid is None:
         quantile_distances, quantile_gaps = quantile_threshold_grid(
             distances, grid_size=args.grid_size
@@ -243,20 +250,22 @@ def main() -> None:
             })
 
     policy = (
-        "Pooled out-of-fold development validation: apply participant voting first; "
+        "Fold-local development validation when both clinical classes are present; "
+        "otherwise pooled out-of-fold development fallback. Apply participant voting first; "
         "enforce Parkinson-to-Control error and coverage constraints; then rank by "
         "Parkinson precision, all-case Parkinson recall, accepted accuracy, coverage "
         "and all-case accuracy."
         if args.selection_unit == "participants"
         else
-        "Pooled out-of-fold development validation at image level; enforce the "
-        "Parkinson-to-Control error and coverage constraints, then rank by the "
-        "same ordered metrics."
+        "Fold-local image-level development validation when both clinical classes are present; "
+        "otherwise pooled out-of-fold development fallback. Enforce Parkinson-to-Control "
+        "error and coverage constraints, then rank by the same ordered metrics."
     )
     report = {
         "status": "selected" if best is not None else "no_feasible_candidate",
         "selection_policy": policy,
         "selection_unit": args.selection_unit,
+        "threshold_selection_metrics_role": THRESHOLD_SELECTION_ROLE,
         "max_pd_to_control_rate": args.max_pd_to_control_rate,
         "min_coverage": args.min_coverage,
         "candidate_count": len(rows),
@@ -285,7 +294,13 @@ def main() -> None:
         source = checkpoint["source_baseline"]
         local = fold_validation[fold]
         local_best = None
-        if len(local["distances"]):
+        local_fallback_reason = None
+
+        if len(local["distances"]) == 0:
+            local_fallback_reason = "empty_fold_validation"
+        elif not _has_both_clinical_classes(local["clinical_targets"]):
+            local_fallback_reason = "fold_validation_does_not_contain_both_clinical_classes"
+        else:
             local_radii, local_gaps = quantile_threshold_grid(
                 local["distances"], grid_size=args.grid_size
             )
@@ -300,6 +315,8 @@ def main() -> None:
                 drawing_ids=local["drawing_ids"],
                 selection_unit=args.selection_unit,
             )
+            if local_best is None:
+                local_fallback_reason = "no_feasible_fold_local_candidate"
 
         selected = local_best if local_best is not None else best
         threshold_source = (
@@ -311,6 +328,7 @@ def main() -> None:
             "distance_threshold": selected["distance_threshold"],
             "gap_threshold": selected["gap_threshold"],
             "threshold_source": threshold_source,
+            "fallback_reason": local_fallback_reason,
         }
         decision = {
             "format_version": "deep-rbf-decision-v1",
@@ -332,6 +350,8 @@ def main() -> None:
             "validation_image_metrics": selected["image_metrics"],
             "validation_participant_metrics": selected["participant_metrics"],
             "threshold_source": threshold_source,
+            "threshold_fallback_reason": local_fallback_reason,
+            "threshold_selection_metrics_role": THRESHOLD_SELECTION_ROLE,
             "validation_folds_used": source_folds,
         }
         decision_dir = record["checkpoint_path"].parent / "threshold_selection"
@@ -340,7 +360,6 @@ def main() -> None:
 
     report["thresholds_by_fold"] = thresholds_by_fold
     write_json(output_dir / "threshold_search_report.json", report)
-
     print(json.dumps({
         "status": report["status"],
         "validation_folds_used": validation_folds,
