@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections import deque
 import html
 import json
 import os
@@ -90,14 +91,21 @@ class ProgressState:
 
 
 def run_with_progress(command: list[str], *, title: str, fold_start: int,
-                      fold_end: int, epochs: int) -> None:
+                      fold_end: int, epochs: int, progress_state=None, log_path=None) -> None:
     from IPython.display import HTML, display
-    state = ProgressState(title, fold_start, fold_end, epochs)
+    state = progress_state if progress_state is not None else ProgressState(title, fold_start, fold_end, epochs)
     view = display(HTML(state.render()), display_id=True)
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                text=True, bufsize=1, start_new_session=True)
     refreshed = 0.0
+    output_tail = deque(maxlen=80)
+    log = None
     try:
+        if log_path is not None:
+            from pathlib import Path
+            log_path = Path(log_path)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log = log_path.open("a", encoding="utf-8", buffering=1)
         for line in process.stdout:
             if line.startswith(PREFIX):
                 event = json.loads(line[len(PREFIX):])
@@ -107,10 +115,15 @@ def run_with_progress(command: list[str], *, title: str, fold_start: int,
                     view.update(HTML(state.render()))
                     refreshed = now
             else:
+                output_tail.append(line)
+                if log is not None:
+                    log.write(line)
                 print(line, end="", flush=True)
         return_code = process.wait()
         if return_code:
-            raise subprocess.CalledProcessError(return_code, command)
+            tail = "".join(output_tail)
+            location = f" Full log: {log_path}." if log_path is not None else ""
+            raise TrainingProcessError(return_code, command, output=tail, log_location=location)
     except BaseException:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGINT)
@@ -122,5 +135,19 @@ def run_with_progress(command: list[str], *, title: str, fold_start: int,
         state.phase = "Stopped — resume from the last completed checkpoint"
         raise
     finally:
+        if log is not None:
+            log.close()
         process.stdout.close()
         view.update(HTML(state.render()))
+
+
+class TrainingProcessError(subprocess.CalledProcessError):
+    """Include the child process error at the bottom of truncated notebook output."""
+
+    def __init__(self, returncode, cmd, *, output, log_location=""):
+        super().__init__(returncode, cmd, output=output)
+        self.log_location = log_location
+
+    def __str__(self):
+        return (f"Training process exited with status {self.returncode}.{self.log_location}\n"
+                f"Last training output:\n{self.output}")

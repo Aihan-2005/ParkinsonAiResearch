@@ -12,6 +12,28 @@ from tests.test_preprocessing_entrypoints import TinyClassifier
 from utils.notebook_training import ProgressState, run_with_progress
 from utils.progress import PREFIX
 from utils.storage import check_training_space
+from utils.cv04_notebook_progress import CV04ProgressState
+
+
+def test_cv04_progress_switches_stages_and_tracks_resumed_epochs_and_features():
+    state = CV04ProgressState("CV04", 1, 25, 15)
+    state.update({"event": "cv04_fold_start", "fold": 2})
+    state.update({"event": "cv04_stage", "stage": "Focal WideResNet", "epochs": 15})
+    state.update({"event": "epoch_start", "fold": 2, "epoch": 6})
+    assert state.completed_epochs == 5
+    state.update({"event": "cv04_stage_done"})
+    assert state.completed_epochs == 15 and state.completed_folds == 0
+    state.update({"event": "cv04_stage", "stage": "Contrastive projection", "epochs": 30})
+    assert state.completed_epochs == 0
+    state.update({"event": "cv04_features", "split": "training", "completed": 5, "total": 10})
+    rendered = state.render()
+    assert "50%" in rendered and "Extracting training features" in rendered
+    assert rendered.count("<progress ") == 3
+    state.update({"event": "epoch_end", "epoch": 30, "train_loss": 0.2})
+    state.update({"event": "cv04_fold_end", "fold": 2})
+    assert state.completed_folds == 1 and state.completed_epochs == 30
+    state.update({"event": "cv04_complete"})
+    assert "Training complete" in state.render()
 
 
 def test_periodic_saves_always_include_final_epoch_and_resume(image_manifest, monkeypatch, capsys):
@@ -93,7 +115,7 @@ def test_notebook_progress_tracks_resume_and_does_not_count_failed_folds():
 
 
 @pytest.mark.parametrize("return_code", [0, 7])
-def test_notebook_stream_shows_progress_and_propagates_failure(monkeypatch, capsys, return_code):
+def test_notebook_stream_shows_progress_and_propagates_failure(monkeypatch, capsys, tmp_path, return_code):
     updates = []
     view = SimpleNamespace(update=updates.append)
     ipython = ModuleType("IPython")
@@ -113,15 +135,21 @@ def test_notebook_stream_shows_progress_and_propagates_failure(monkeypatch, caps
     ]
     script = ("import sys\nprint('training log', flush=True)\n"
               + "\n".join(f"print({(PREFIX + json.dumps(event))!r}, flush=True)" for event in events)
+              + "\nprint('RuntimeError: original training failure', flush=True)"
               + f"\nsys.exit({return_code})")
     command = [sys.executable, "-u", "-c", script]
+    log = tmp_path / "run.log"
     if return_code:
-        with pytest.raises(subprocess.CalledProcessError):
-            run_with_progress(command, title="CE", fold_start=1, fold_end=1, epochs=1)
+        with pytest.raises(subprocess.CalledProcessError) as caught:
+            run_with_progress(command, title="CE", fold_start=1, fold_end=1, epochs=1, log_path=log)
+        assert "original training failure" in str(caught.value)
+        assert "original training failure" in caught.value.output
+        assert str(log) in str(caught.value)
         assert "Stopped" in updates[-1]
     else:
-        run_with_progress(command, title="CE", fold_start=1, fold_end=1, epochs=1)
+        run_with_progress(command, title="CE", fold_start=1, fold_end=1, epochs=1, log_path=log)
         assert "Fold completed" in updates[-1]
     assert updates[-1].count("<progress ") == 3
     output = capsys.readouterr().out
     assert "training log" in output and PREFIX not in output
+    assert "training log" in log.read_text() and PREFIX not in log.read_text()

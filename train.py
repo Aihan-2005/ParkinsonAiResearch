@@ -33,9 +33,11 @@ def _save_checkpoint(path: Path, checkpoint: dict) -> None:
             return sum(tensor_bytes(item) for item in value)
         return 0
     needed = int(tensor_bytes(checkpoint) * 1.05) + 1024 ** 2
-    if shutil.disk_usage(path.parent).free < needed:
+    available = shutil.disk_usage(path.parent).free
+    if available < needed:
         raise RuntimeError(f"Not enough checkpoint storage at {path.parent}. "
-                           f"Need at least {needed / 1e9:.2f} GB free for the temporary save. "
+                           f"Filesystem reports {available / 1e9:.2f} GB free; "
+                           f"need at least {needed / 1e9:.2f} GB for the temporary save. "
                            "Keep existing checkpoints, free space, then resume.")
     temporary = path.with_suffix(path.suffix + ".tmp")
     try:

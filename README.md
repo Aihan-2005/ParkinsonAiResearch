@@ -4,7 +4,7 @@ WideResNet + CE / focal: [thesis comparison, implementation audit and run comman
 The complete [baseline notebook](notebooks/01_wideresnet50_2.ipynb) calls the same training scripts.
 
 CV04: [thesis-guided contrastive learning + KNN](README/CV04_CONTRASTIVE_KNN.md),
-including [the Colab notebook](notebooks/02_contrastive_knn.ipynb), fold experiments,
+including [the VS Code + Colab GPU notebook](notebooks/CV04_VSCode_ColabDisk_Recovery.ipynb), fold experiments,
 development selection, frozen checkpoints, participant reports and unlabeled inference.
 
 CV07: [thesis-guided Triplet + KNN](README/CV07_TRIPLET_KNN.md),

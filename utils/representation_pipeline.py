@@ -84,7 +84,7 @@ def load_baseline(path: Path, manifest: Path, device: torch.device,
 @torch.no_grad()
 def extract_features(model: torch.nn.Module, source: dict, *, manifest: Path,
                      root: Path, split: str, device: torch.device, batch_size: int = 8,
-                     confirm_heldout_test: bool = False) -> FeatureSet:
+                     confirm_heldout_test: bool = False, on_batch=None) -> FeatureSet:
     if split not in {"train", "val", "test"}:
         raise ValueError("split must be train, val or test")
     if split == "test" and not confirm_heldout_test:
@@ -101,7 +101,7 @@ def extract_features(model: torch.nn.Module, source: dict, *, manifest: Path,
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
     features, targets, clinical, rows = [], [], [], []
     model.eval()
-    for batch in loader:
+    for completed, batch in enumerate(loader, 1):
         values = model.forward_features(batch["image"].to(device)).cpu()
         if values.shape != (len(batch["label"]), 2048) or not torch.isfinite(values).all():
             raise ValueError("Baseline returned invalid pooled features")
@@ -113,6 +113,8 @@ def extract_features(model: torch.nn.Module, source: dict, *, manifest: Path,
                 key: str(batch[key][i])
                 for key in ("drawing_id", "participant_id", "image_name", "image_path", "clinical_label")
             })
+        if on_batch is not None:
+            on_batch(completed, len(loader))
     return FeatureSet(
         torch.cat(features) if features else torch.empty(0, 2048),
         torch.cat(targets) if targets else torch.empty(0, dtype=torch.long),

@@ -3,7 +3,7 @@
 CV04 is implemented as a complete development workflow: one-fold training,
 resume, multiple-fold experiments, pooled development selection, frozen selected
 checkpoints, independent evaluation and unlabeled image inference. The notebook
-is `notebooks/02_contrastive_knn.ipynb`. No new Python dependency is required.
+is `notebooks/CV04_VSCode_ColabDisk_Recovery.ipynb`. No new Python dependency is required.
 
 ## What follows the thesis
 
@@ -166,14 +166,76 @@ expert query labels. It writes neighbor vote fractions and source hashes.
 
 ## Colab and verification
 
-The notebook uses the existing shared dataset and focal baseline runs on Drive.
-Package current code using `python prepare_colab_code.py --output
-outputs/colab_upload/parkinson_training_code_v3_cv04.zip`. The delivered notebook
-pins the generated archive hash. Copy that archive to
-`My Drive/ParkinsonResearch/` before running it in Colab; the prior v2 archive
-does not include this implementation. Existing notebooks and their pinned code
-archives remain unchanged. Repackage and update the CV04 notebook hash together
-after future code edits.
+The current CV04 notebook is
+`notebooks/CV04_VSCode_ColabDisk_Recovery.ipynb`. Older CV04 notebook variants
+were removed to keep one entrypoint. Open it in VS Code with the existing remote
+Colab GPU server; the Mac is the editor and download destination, while all
+training executes on Colab's GPU.
+
+### Setup and saved work
+
+The notebook reads the checksum-pinned
+`My Drive/ParkinsonResearch/parkinson_training_code_v7_cv04_storage_fix.zip`
+and `My Drive/ParkinsonResearch/datasets/parkinson_dataset_v1.zip`. No new code
+upload is required when using those existing files. Normal readable Python
+sources are extracted on Colab; there is no encoded archive inside notebook cells.
+
+It copies and verifies an existing run from Drive without changing the originals,
+then rebases projection references to hash-identical copied backbones. If a local
+run already exists, it is retained instead of being overwritten by older Drive
+files. Checkpoints, reports, logs and ZIP exports go only under
+`/content/ParkinsonRuns`, `/content/ParkinsonLogs` and `/content/ParkinsonExports`.
+The notebook measures the Colab VM's available disk space automatically.
+
+### Run All and partial training
+
+`FOLDS_PER_RUN = 25` is the default: Run All skips completed folds, trains every
+remaining requested fold, creates a verified ZIP after each, and then performs
+KNN selection, independent reload and final report export. Download completed
+ZIPs while training continues; files still only on `/content` are temporary.
+
+Set `FOLDS_PER_RUN = 1` to pause after each unfinished fold for a download. In
+that mode, selection safely waits until every requested projection is complete;
+reload and final report export wait for selection. A missing fold is never
+hashed or passed to the selector. Rerun the training cell to continue, then rerun
+selection and later cells once the requested development schedule is finished.
+Progress bars show completed folds, current stage epochs, batches, loss and time.
+
+### Compact saving and recovery
+
+Only the active focal fold retains optimizer/RNG state in one rolling last
+checkpoint, saved each epoch on Colab disk. At completion the full-precision
+backbone is saved separately and compared tensor-for-tensor, then the redundant
+active optimizer checkpoint is removed from the local run. Completed backbones
+retain fold, class mapping, preprocessing and manifest identity, and can be reused
+for CV07. Small contrastive/KNN checkpoints retain their own resume state.
+
+Each completed-fold ZIP contains one backbone, its small projection/KNN checkpoint,
+recipe, history and reports. ZIPs are lossless and checksum-verified; dense float
+weights may compress only modestly. The final reports ZIP adds selected projections
+and reports without duplicating backbones. Download all these ZIPs to retain them
+across Colab VM deletion. The optional recovery cell restores downloaded archives
+on a fresh VM before the settings/import cell. Completed-fold ZIPs do not contain
+an unfinished fold's optimizer state.
+
+The active checkpoint is checked before training. On a PyTorch archive-reading
+failure, a readable matching Drive copy is tried first. If no readable active
+copy survives, the local unfinished work folder is preserved under
+`/content/ParkinsonQuarantine` and only that fold restarts. Completed backbones
+and Drive files are not removed by recovery. Metadata mismatches and unrelated
+errors stop instead of being treated as corruption. The log retains full output;
+the notebook displays a short excerpt of the actual error to avoid VS Code's
+long-output truncation hiding its cause.
+
+Measured backbone tensor storage is 267.63 MB/fold, or 6.69 GB for 25 folds;
+an active resumable checkpoint is approximately 769.35 MB before serialization
+overhead. The planner allows temporary saves, selection files and a safety margin,
+plus room for ZIP exports. This concerns the Colab VM disk, not free Drive quota.
+
+Run `python -m pytest -q tests/test_cv04_colab_disk.py tests/test_cv04_compact.py
+ tests/test_training_progress.py` for saving, corruption recovery, lossless
+backup/restore, progress and complete/incomplete notebook workflow checks. These
+software tests use synthetic inputs, not full research-cohort GPU training.
 
 Run `python -m pytest -q tests/test_cv04.py tests/test_representation_models.py
 tests/test_representation_pipeline.py` for the targeted checks. They cover an

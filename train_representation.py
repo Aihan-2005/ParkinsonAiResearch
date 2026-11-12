@@ -22,6 +22,7 @@ from utils.representation_pipeline import (
     extract_features, load_baseline, predict_stage, write_predictions,
 )
 from utils.reproducibility import seed_everything
+from utils.progress import TrainingProgress, emit_progress
 
 
 def parse_args(argv=None, *, cv04=False, cv07=False) -> argparse.Namespace:
@@ -59,6 +60,7 @@ def parse_args(argv=None, *, cv04=False, cv07=False) -> argparse.Namespace:
     parser.add_argument("--knn-k", type=int, default=3)
     parser.add_argument("--knn-weighting", choices=("uniform", "distance"), default="uniform")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--progress-json", action="store_true")
     args = parser.parse_args(argv)
 
     if min(args.epochs, args.embedding_dim, args.feature_batch_size, args.knn_k) < 1:
@@ -98,13 +100,19 @@ def main(argv=None, *, cv04=False, cv07=False) -> None:
     )
     if (cv04 or cv07) and not args.allow_non_focal_baseline and (source.get("baseline_loss") or {}).get("name") != "focal":
         raise ValueError(f"{'CV07' if cv07 else 'CV04'} requires a focal baseline; use --allow-non-focal-baseline for a recorded ablation")
+    def feature_progress(split):
+        if not args.progress_json:
+            return {}
+        return {"on_batch": lambda completed, total: emit_progress(
+            "cv04_features", fold=args.fold_id, split=split, completed=completed, total=total)}
+
     train = extract_features(
         backbone, source, manifest=args.manifest, root=args.root,
-        split="train", device=device, batch_size=args.feature_batch_size,
+        split="train", device=device, batch_size=args.feature_batch_size, **feature_progress("training"),
     )
     validation = extract_features(
         backbone, source, manifest=args.manifest, root=args.root,
-        split="val", device=device, batch_size=args.feature_batch_size,
+        split="val", device=device, batch_size=args.feature_batch_size, **feature_progress("validation"),
     )
     del backbone
 
@@ -255,7 +263,10 @@ def main(argv=None, *, cv04=False, cv07=False) -> None:
     )
     print(json.dumps(diagnostics, sort_keys=True))
 
+    progress = TrainingProgress(fold=args.fold_id, epochs=args.epochs, start_epoch=start_epoch,
+                                json_output=True, enabled=args.progress_json)
     for epoch in range(start_epoch, args.epochs + 1):
+        progress.start(epoch)
         model.train()
         optimizer.zero_grad(set_to_none=True)
         loss = criterion(model(x), positive, negative) if cv07 else criterion(model(x), left, right, same)
@@ -268,9 +279,13 @@ def main(argv=None, *, cv04=False, cv07=False) -> None:
         if any(not torch.isfinite(p).all() for p in model.parameters()):
             raise ValueError("Nonfinite metric-learning parameter after optimizer step")
         history.append({"epoch": epoch, "training_loss_before_update": float(loss.detach())})
+        progress.batch("Projection update", 1, 1, float(loss.detach()))
+        progress.saving()
         atomic_checkpoint(last_path, payload(epoch))
+        progress.complete(float(loss.detach()), None)
         print(f"Epoch {epoch:03d}/{args.epochs} | loss={float(loss.detach()):.6f}")
 
+    progress.close()
     checkpoint = payload(args.epochs)
     checkpoint["stage_checkpoint_sha256"] = sha256_file(last_path)
     rows = predict_stage(model, validation, checkpoint, device)
