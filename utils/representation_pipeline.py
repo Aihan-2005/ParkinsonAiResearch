@@ -283,9 +283,14 @@ def write_predictions(output_dir: Path, rows: list[dict], checkpoint: dict, *, s
         "metrics": prediction_metrics(rows), "config": config,
         "source_baseline": checkpoint["source_baseline"],
         "training_diagnostics": checkpoint["training_diagnostics"],
-        "selection_policy": "fixed_epoch_budget_final_checkpoint",
+        "selection_policy": ("pooled_development_oof_selection; frozen_final_checkpoint" if checkpoint.get("selection") else
+                             "fixed_epoch_budget_final_checkpoint"),
+        "selection": checkpoint.get("selection"),
         "test_partition_loaded_or_evaluated": split == "test",
-        "fidelity_note": FIDELITY_NOTE,
+        "fidelity_note": checkpoint.get("fidelity_note", FIDELITY_NOTE),
     }
     write_json(output_dir / f"{split}_report.json", report)
+    if config.get("experiment") in {"CV04", "CV07"}:
+        from utils.cv04_pipeline import write_cv04_reports
+        write_cv04_reports(output_dir, rows, split=split, metadata=common, experiment=config["experiment"])
     return report

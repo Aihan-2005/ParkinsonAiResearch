@@ -1,4 +1,4 @@
-"""Train the independent contrastive-projection + KNN comparator.
+"""Train a separate contrastive or triplet projection followed by training-only KNN.
 
 The thesis-oriented DeepRBF is a separate pipeline. This entrypoint supports
 only ``--branch metric``.
@@ -16,7 +16,7 @@ import torch
 from config import CLASS_NAMES, DATA, ROOT_DIR
 from utils.io import sha256_file
 from utils.loops import select_device
-from utils.metric_learning import ContrastiveLoss, make_contrastive_pairs
+from utils.metric_learning import ContrastiveLoss, SupervisedContrastiveLoss, make_contrastive_pairs
 from utils.representation_pipeline import (
     FIDELITY_NOTE, FORMAT_VERSION, atomic_checkpoint, build_stage, config_digest,
     extract_features, load_baseline, predict_stage, write_predictions,
@@ -24,9 +24,13 @@ from utils.representation_pipeline import (
 from utils.reproducibility import seed_everything
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv=None, *, cv04=False, cv07=False) -> argparse.Namespace:
+    if cv04 and cv07:
+        raise ValueError("Choose one metric experiment")
+    named_experiment = cv04 or cv07
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--branch", choices=("metric",), required=True)
+    parser.add_argument("--branch", choices=("metric",),
+                        default="metric" if named_experiment else None, required=not named_experiment)
     parser.add_argument("--baseline-checkpoint", type=Path, required=True)
     parser.add_argument("--fold-id", type=int, choices=range(1, 26), required=True)
     parser.add_argument("--manifest", type=Path, default=DATA.fold_manifest_path)
@@ -34,7 +38,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--embedding-dim", type=int, default=64)
-    parser.add_argument("--normalize", action="store_true")
+    parser.add_argument("--normalize", action=argparse.BooleanOptionalAction, default=cv04)
+    if cv07:
+        parser.add_argument("--triplet-mining", choices=("all", "batch_hard"), default="all")
+        parser.add_argument("--positive-policy", choices=("all", "cross_participant"), default="all")
+    else:
+        parser.add_argument("--contrastive-loss", choices=("supcon", "thesis_pairwise", "balanced"),
+                            default="supcon" if cv04 else "balanced")
+        parser.add_argument("--temperature", type=float, default=0.1)
+        parser.add_argument("--pair-policy", choices=("all", "cross_participant"),
+                            default="all" if cv04 else "cross_participant")
+    parser.add_argument("--allow-non-focal-baseline", action="store_true")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=42)
@@ -45,7 +59,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--knn-k", type=int, default=3)
     parser.add_argument("--knn-weighting", choices=("uniform", "distance"), default="uniform")
     parser.add_argument("--resume", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if min(args.epochs, args.embedding_dim, args.feature_batch_size, args.knn_k) < 1:
         parser.error("epochs, dimensions, feature batch size and k must be positive")
@@ -55,8 +69,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("learning rate must be finite and positive")
     if not math.isfinite(args.weight_decay) or args.weight_decay < 0:
         parser.error("weight decay must be finite and nonnegative")
-    if not math.isfinite(args.margin) or args.margin <= 0:
-        parser.error("contrastive margin must be finite and positive")
+    if any(not math.isfinite(v) or v <= 0 for v in (args.margin, getattr(args, "temperature", 0.1))):
+        parser.error("Margin and temperature must be finite and positive")
     return args
 
 
@@ -74,14 +88,16 @@ def _restore_rng(payload: dict) -> None:
         torch.cuda.set_rng_state_all(payload["cuda_rng_state_all"])
 
 
-def main() -> None:
-    args = parse_args()
+def main(argv=None, *, cv04=False, cv07=False) -> None:
+    args = parse_args(argv, cv04=cv04, cv07=cv07)
     seed_everything(args.seed)
     device = select_device(args.device)
 
     backbone, source = load_baseline(
         args.baseline_checkpoint, args.manifest, device, fold_id=args.fold_id
     )
+    if (cv04 or cv07) and not args.allow_non_focal_baseline and (source.get("baseline_loss") or {}).get("name") != "focal":
+        raise ValueError(f"{'CV07' if cv07 else 'CV04'} requires a focal baseline; use --allow-non-focal-baseline for a recorded ablation")
     train = extract_features(
         backbone, source, manifest=args.manifest, root=args.root,
         split="train", device=device, batch_size=args.feature_batch_size,
@@ -95,9 +111,15 @@ def main() -> None:
     x, y = train.features.to(device), train.targets.to(device)
     participant_ids = [row["participant_id"] for row in train.rows]
     training_ids = [row["drawing_id"] for row in train.rows]
-    left, right, same, pair_info = make_contrastive_pairs(y, participant_ids)
-    if not pair_info["positive_pairs"] or not pair_info["negative_pairs"]:
-        raise ValueError("Metric training requires positive and negative pairs")
+    if cv07:
+        from utils.triplet_learning import make_triplet_masks
+        positive, negative, pair_info = make_triplet_masks(y, participant_ids, policy=args.positive_policy)
+        if not pair_info["valid_triplets"]:
+            raise ValueError("Triplet training requires an anchor with a positive and a negative")
+    else:
+        left, right, same, pair_info = make_contrastive_pairs(y, participant_ids, policy=args.pair_policy)
+        if not pair_info["positive_pairs"] or not pair_info["negative_pairs"]:
+            raise ValueError("Metric training requires positive and negative pairs")
     if args.knn_k > len(train.rows):
         raise ValueError("KNN k exceeds this fold's training-bank size")
 
@@ -118,9 +140,34 @@ def main() -> None:
         "contrastive_distance": "l2",
         "contrastive_loss": "mean_nonempty_positive_d2_and_negative_hinge_squared_means_v1",
     }
+    # Preserve the old configuration/digest for existing comparator resumes.
+    if cv07:
+        config.pop("contrastive_distance")
+        config.pop("contrastive_loss")
+        config.update(experiment="CV07", metric_loss="thesis_triplet_squared_l2",
+                      triplet_distance="squared_l2", triplet_mining=args.triplet_mining,
+                      triplet_reduction=("mean_all_valid_ordered_triplets_including_zeros" if args.triplet_mining == "all"
+                                         else "mean_hardest_triplet_per_valid_anchor_including_zeros"),
+                      positive_policy=args.positive_policy,
+                      allow_non_focal_baseline=args.allow_non_focal_baseline)
+    elif cv04 or args.contrastive_loss != "balanced" or args.pair_policy != "cross_participant":
+        config.update(experiment="CV04" if cv04 else "metric_comparator",
+                      contrastive_loss=args.contrastive_loss, pair_policy=args.pair_policy)
+        if args.contrastive_loss == "supcon":
+            config.update(temperature=args.temperature, contrastive_distance="cosine_normalized_dot_product")
+            config.pop("margin", None)
+        config["allow_non_focal_baseline"] = args.allow_non_focal_baseline
     digest = config_digest(config, source)
+    if cv07:
+        from utils.triplet_learning import CV07_FIDELITY_NOTE
+        fidelity_note = CV07_FIDELITY_NOTE
+    elif cv04:
+        from utils.cv04_pipeline import CV04_FIDELITY_NOTE
+        fidelity_note = CV04_FIDELITY_NOTE
+    else:
+        fidelity_note = FIDELITY_NOTE
     output_dir = args.output_dir or (
-        ROOT_DIR / "outputs" / "representations" / f"metric_fold{args.fold_id:02d}_{digest}"
+        ROOT_DIR / "outputs" / ("cv07" if cv07 else "representations") / f"metric_fold{args.fold_id:02d}_{digest}"
     )
     last_path = output_dir / "last.pt"
     if args.resume and not last_path.is_file():
@@ -129,13 +176,20 @@ def main() -> None:
         raise ValueError("Output directory is nonempty; use --resume or choose a new directory")
 
     model = build_stage(config).to(device)
-    criterion = ContrastiveLoss(args.margin)
+    if cv07:
+        from utils.triplet_learning import ThesisTripletLoss
+        criterion = ThesisTripletLoss(args.margin, args.triplet_mining)
+    else:
+        criterion = (SupervisedContrastiveLoss(args.temperature) if args.contrastive_loss == "supcon" else
+                     ContrastiveLoss(args.margin, reduction="thesis_pairwise" if args.contrastive_loss == "thesis_pairwise" else "balanced"))
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     history: list[dict] = []
     start_epoch = 1
 
     if args.resume:
         checkpoint = torch.load(last_path, map_location="cpu", weights_only=True)
+        if checkpoint.get("selection"):
+            raise ValueError("Selected inference checkpoints cannot be resumed as training runs")
         if (checkpoint.get("format_version") != FORMAT_VERSION
                 or checkpoint.get("config") != config
                 or checkpoint.get("config_digest") != digest):
@@ -162,6 +216,11 @@ def main() -> None:
         "torch_version": str(torch.__version__),
     }
 
+    if not cv07:
+        positive_anchors = set(left[same].tolist()) | set(right[same].tolist())
+        diagnostics["anchors_without_positives"] = len(y) - len(positive_anchors)
+    diagnostics["missing_expert_classes"] = [CLASS_NAMES[c] for c in range(3) if not (y == c).any()]
+
     def payload(epoch: int) -> dict:
         with torch.no_grad():
             bank = {
@@ -172,7 +231,7 @@ def main() -> None:
             }
         return {
             "format_version": FORMAT_VERSION,
-            "stage": "contrastive_projection_knn",
+            "stage": "triplet_projection_knn" if cv07 else "contrastive_projection_knn",
             "config": config,
             "config_digest": digest,
             "source_baseline": source,
@@ -187,7 +246,7 @@ def main() -> None:
             "training_participant_ids": sorted(set(participant_ids)),
             "training_bank": bank,
             "training_diagnostics": diagnostics,
-            "fidelity_note": FIDELITY_NOTE,
+            "fidelity_note": fidelity_note,
         }
 
     print(
@@ -199,7 +258,7 @@ def main() -> None:
     for epoch in range(start_epoch, args.epochs + 1):
         model.train()
         optimizer.zero_grad(set_to_none=True)
-        loss = criterion(model(x), left, right, same)
+        loss = criterion(model(x), positive, negative) if cv07 else criterion(model(x), left, right, same)
         if not torch.isfinite(loss):
             raise ValueError("Nonfinite metric-learning loss")
         loss.backward()

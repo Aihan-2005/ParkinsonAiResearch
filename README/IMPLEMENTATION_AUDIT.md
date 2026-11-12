@@ -1,5 +1,11 @@
 # Representation learning and RBF implementation audit
 
+**Superseding CV04 update (2026-11-12):** see [CV04_CONTRASTIVE_KNN.md](CV04_CONTRASTIVE_KNN.md).
+The earlier metric-coverage inventory below is historical. CV04 now includes
+the cited SupCon and printed pairwise objectives, all-fold runs, shared
+development selection, OOF/participant reports and unlabeled inference. Exact
+thesis settings and independent research-cohort performance remain unestablished.
+
 **Date:** 2026-11-11
 
 **Conclusion:** the repository implements a contrastive-learning/KNN comparator
@@ -69,7 +75,8 @@ equation 4.
 | Equal positive/negative group-mean weighting | Implemented adaptation; not the original uniform-pair reduction |
 | Training-only KNN with L1/L2 and uniform/distance voting | Implemented |
 | Fold/source checks, resume, reload and image reports | Implemented |
-| Triplet, OSM, GMML | Not implemented |
+| Triplet + KNN (CV07) | Implemented; see `CV07_TRIPLET_KNN.md` for the equation, lifecycle and source limits |
+| OSM, GMML | Not implemented |
 | Hard/semi-hard mining or scalable balanced minibatch sampler | Not implemented; the current method uses all eligible pairs |
 | Automatic k/margin/threshold selection | Not implemented; settings are supplied explicitly |
 | Representation-stage fold runner and pooled OOF report | Not implemented |

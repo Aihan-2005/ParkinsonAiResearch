@@ -1,5 +1,10 @@
 # Metric learning and learned-centre RBF
 
+**CV04 update (2026-11-12):** the dedicated [CV04 workflow](CV04_CONTRASTIVE_KNN.md)
+adds the cited multiclass SupCon objective, the literal thesis pairwise reduction,
+fold automation, shared development selection, pooled reports and unlabeled inference.
+The commands below retain the earlier comparator defaults for compatibility.
+
 **Implementation scope:** the contrastive + KNN comparator is implemented; the
 RBF branch is a restricted learned-centre prototype. Neither is a completed
 thesis reproduction. See [IMPLEMENTATION_AUDIT.md](IMPLEMENTATION_AUDIT.md) for
@@ -181,7 +186,9 @@ Epoch selection uses the fixed final budget. Learning rates, margins, thresholds
 k, normalization and epoch budget are development protocol choices. No automatic
 hyperparameter search is included. Logs are image-level reports; ensemble and
 participant voting, clinical-reference reports and pooled B4 experiment reports
-remain A4/B3 work. Triplet, OSM and GMML remain later comparisons.
+remain A4/B3 work for the legacy comparator. The dedicated CV04 and CV07 workflows
+now include pooled selection and participant reports; see `CV04_CONTRASTIVE_KNN.md`
+and `CV07_TRIPLET_KNN.md`. CV07 implements Triplet + KNN. OSM and GMML remain later comparisons.
 
 ## Verification and review
 
